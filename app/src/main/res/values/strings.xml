@@ -1,0 +1,36 @@
+<resources>
+    <string name="app_name">Campaign SMS</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_contacts">Contacts</string>
+    <string name="nav_send_sms">Send SMS</string>
+    <string name="nav_history">History</string>
+
+    <string name="home_send_sms_cta">SEND SMS</string>
+    <string name="home_send_sms_subtitle">Write message, pick recipients &amp; send</string>
+    <string name="home_customize_org">Customize Organisation &amp; Colours</string>
+    <string name="home_change_photo">Change Photo / Logo</string>
+
+    <string name="contacts_title">Contacts List</string>
+    <string name="contacts_add_manual">Add Contact</string>
+    <string name="contacts_import_csv">Import CSV</string>
+    <string name="contacts_select_all">Select All</string>
+    <string name="contacts_deselect_all">Deselect All</string>
+    <string name="contacts_empty_title">No contacts added yet</string>
+    <string name="contacts_empty_subtitle">Add phone numbers manually or import a contact list from a CSV file to get started.</string>
+
+    <string name="send_sms_title">Write &amp; Send SMS</string>
+    <string name="write_message_label">1. Write Your Message</string>
+    <string name="select_recipients_label">2. Select Recipients</string>
+    <string name="confirm_send_title">Confirm Before Sending</string>
+    <string name="confirm_send_button">Confirm &amp; Send SMS</string>
+    <string name="cancel_button">Cancel</string>
+
+    <string name="history_title">Message History</string>
+    <string name="history_empty_title">No messages sent yet</string>
+    <string name="history_empty_subtitle">Messages you send will appear here with the date, recipient count, and real sending status.</string>
+
+    <string name="default_org_name">JOYCE AFI FIANU</string>
+    <string name="default_org_role">FOR WOMEN ORGANIZER</string>
+    <string name="default_org_slogan">Together, We Can Work For Change.</string>
+    <string name="default_campaign_message">Please vote for Joyce Afi Fianu as your Women Organizer. Together, we can work for change. Thank you.</string>
+</resources>
