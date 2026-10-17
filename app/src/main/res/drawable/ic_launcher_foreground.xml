@@ -4,31 +4,24 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Bold SMS Speech Bubble with Campaign Megaphone / Star Silhouette inside 66dp safe zone -->
-    <group
-        android:translateX="21"
-        android:translateY="21">
-        <!-- Outer White Speech Card -->
-        <path
-            android:fillColor="#FFFFFF"
-            android:pathData="M10,8 H56 C60.4,8 64,11.6 64,16 V42 C64,46.4 60.4,50 56,50 H26 L14,60 V50 H10 C5.6,50 2,46.4 2,42 V16 C2,11.6 5.6,8 10,8 Z" />
-        <!-- Red Campaign Star / Badge on Top Right -->
-        <path
-            android:fillColor="#D32F2F"
-            android:pathData="M53,4 L55.9,9.9 L62.4,10.8 L57.7,15.4 L58.8,21.9 L53,18.8 L47.2,21.9 L48.3,15.4 L43.6,10.8 L50.1,9.9 Z" />
-        <!-- Bold Dark Green Megaphone / Broadcast Icon inside Bubble -->
-        <path
-            android:fillColor="#0B4F26"
-            android:pathData="M14,25 H21 L34,17 V41 L21,33 H14 C12.3,33 11,31.7 11,30 V28 C11,26.3 12.3,25 14,25 Z" />
-        <path
-            android:fillColor="#0B4F26"
-            android:pathData="M17,34 H22 L25,43 H19.5 Z" />
-        <!-- Red Broadcast Sound Waves -->
-        <path
-            android:fillColor="#D32F2F"
-            android:pathData="M39,23 C41.5,25.2 41.5,32.8 39,35 L41.8,37.2 C45.8,33.5 45.8,24.5 41.8,20.8 Z" />
-        <path
-            android:fillColor="#D32F2F"
-            android:pathData="M45,18.5 C49.2,22.8 49.2,35.2 45,39.5 L47.8,41.8 C53.4,36.2 53.4,21.8 47.8,16.2 Z" />
-    </group>
+    <!-- Gong-gong (dawuro) bell with sound waves, kept inside the 66dp safe zone (21..87). -->
+    <!-- Handle -->
+    <path
+        android:fillColor="#FCD116"
+        android:pathData="M45,30 h8 v8 h-8 z" />
+    <!-- Bell body -->
+    <path
+        android:fillColor="#FCD116"
+        android:pathData="M49,36 C39,36 35,46 35,58 L35,66 L31,72 L67,72 L63,66 L63,58 C63,46 59,36 49,36 Z" />
+    <!-- Clapper -->
+    <path
+        android:fillColor="#FCD116"
+        android:pathData="M43,75 a6,6 0 1,0 12,0 z" />
+    <!-- Sound waves -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M70,46 C73.5,49.5 73.5,58.5 70,62 L72.8,64.8 C78,59.6 78,48.4 72.8,43.2 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M76,40 C82,46 82,62 76,68 L78.8,70.8 C86.4,63.2 86.4,44.8 78.8,37.2 Z" />
 </vector>

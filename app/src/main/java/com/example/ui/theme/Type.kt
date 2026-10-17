@@ -2,88 +2,26 @@ package com.example.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.Font
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
-import com.example.R
 
-val MontserratFontFamily = FontFamily(
-    Font(R.font.montserrat, FontWeight.Normal),
-    Font(R.font.montserrat, FontWeight.Bold),
-    Font(R.font.montserrat, FontWeight.ExtraBold),
-    Font(R.font.montserrat, FontWeight.Black)
-)
-
-val PlusJakartaFontFamily = FontFamily(
-    Font(R.font.plus_jakarta_sans, FontWeight.Normal),
-    Font(R.font.plus_jakarta_sans, FontWeight.Medium),
-    Font(R.font.plus_jakarta_sans, FontWeight.SemiBold),
-    Font(R.font.plus_jakarta_sans, FontWeight.Bold)
-)
+// The system font is used on purpose: it has real bold weights and covers the letters used in
+// Twi, Ewe, Ga and Dagbani (ɛ, ɔ, ŋ, ƒ, ʋ) plus the cedi sign. Sizes lean slightly larger than
+// Material defaults for comfortable reading on budget phones.
+private val Base = Typography()
 
 val Typography = Typography(
-    displayLarge = TextStyle(
-        fontFamily = MontserratFontFamily,
-        fontWeight = FontWeight.Black,
-        fontSize = 36.sp,
-        lineHeight = 42.sp,
-        letterSpacing = (-0.5).sp
-    ),
-    displayMedium = TextStyle(
-        fontFamily = MontserratFontFamily,
-        fontWeight = FontWeight.ExtraBold,
-        fontSize = 28.sp,
-        lineHeight = 34.sp,
-        letterSpacing = (-0.25).sp
-    ),
-    headlineLarge = TextStyle(
-        fontFamily = MontserratFontFamily,
-        fontWeight = FontWeight.ExtraBold,
-        fontSize = 24.sp,
-        lineHeight = 30.sp
-    ),
-    headlineMedium = TextStyle(
-        fontFamily = MontserratFontFamily,
-        fontWeight = FontWeight.Bold,
-        fontSize = 20.sp,
-        lineHeight = 26.sp
-    ),
-    titleLarge = TextStyle(
-        fontFamily = MontserratFontFamily,
-        fontWeight = FontWeight.Bold,
-        fontSize = 18.sp,
-        lineHeight = 24.sp
-    ),
-    titleMedium = TextStyle(
-        fontFamily = PlusJakartaFontFamily,
-        fontWeight = FontWeight.Bold,
-        fontSize = 16.sp,
-        lineHeight = 22.sp
-    ),
-    bodyLarge = TextStyle(
-        fontFamily = PlusJakartaFontFamily,
-        fontWeight = FontWeight.Medium,
-        fontSize = 16.sp,
-        lineHeight = 24.sp
-    ),
-    bodyMedium = TextStyle(
-        fontFamily = PlusJakartaFontFamily,
-        fontWeight = FontWeight.Normal,
-        fontSize = 14.sp,
-        lineHeight = 20.sp
-    ),
-    labelLarge = TextStyle(
-        fontFamily = MontserratFontFamily,
-        fontWeight = FontWeight.Bold,
-        fontSize = 15.sp,
-        lineHeight = 20.sp,
-        letterSpacing = 0.4.sp
-    ),
-    labelMedium = TextStyle(
-        fontFamily = PlusJakartaFontFamily,
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 12.sp,
-        lineHeight = 16.sp
-    )
+    displaySmall = Base.displaySmall.copy(fontWeight = FontWeight.Bold),
+    headlineLarge = Base.headlineLarge.copy(fontWeight = FontWeight.Bold),
+    headlineMedium = Base.headlineMedium.copy(fontWeight = FontWeight.Bold),
+    headlineSmall = Base.headlineSmall.copy(fontWeight = FontWeight.Bold, fontSize = 24.sp, lineHeight = 32.sp),
+    titleLarge = Base.titleLarge.copy(fontWeight = FontWeight.SemiBold, fontSize = 21.sp, lineHeight = 28.sp),
+    titleMedium = Base.titleMedium.copy(fontWeight = FontWeight.SemiBold, fontSize = 17.sp, lineHeight = 24.sp),
+    titleSmall = Base.titleSmall.copy(fontWeight = FontWeight.SemiBold, fontSize = 15.sp),
+    bodyLarge = Base.bodyLarge.copy(fontSize = 17.sp, lineHeight = 25.sp),
+    bodyMedium = Base.bodyMedium.copy(fontSize = 15.sp, lineHeight = 21.sp),
+    bodySmall = Base.bodySmall.copy(fontSize = 13.sp, lineHeight = 18.sp),
+    labelLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 15.sp, lineHeight = 20.sp, letterSpacing = 0.1.sp),
+    labelMedium = Base.labelMedium.copy(fontWeight = FontWeight.SemiBold, fontSize = 13.sp),
+    labelSmall = Base.labelSmall.copy(fontWeight = FontWeight.Medium, fontSize = 12.sp)
 )

@@ -1,6 +1,6 @@
 {
-  "name": "Campaign SMS",
-  "description": "Simple, bold campaign and organisation SMS broadcast messenger with CSV contact import and real-time delivery tracking.",
+  "name": "Dawuro",
+  "description": "Send one SMS to many people at once — for churches, groups, businesses and families in Ghana. Import contacts, use ready-made templates, and see who received your message.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

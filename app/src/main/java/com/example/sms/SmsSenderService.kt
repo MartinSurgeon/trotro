@@ -3,24 +3,26 @@ package com.example.sms
 import android.Manifest
 import android.app.Activity
 import android.app.PendingIntent
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.telephony.SmsManager
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
-import com.example.BuildConfig
+import com.example.data.BroadcastStatus
 import com.example.data.CampaignRepository
 import com.example.data.ContactEntity
-import kotlinx.coroutines.CoroutineScope
+import com.example.data.DeliveryStatus
+import com.example.data.RecipientDeliveryEntity
+import com.example.data.SendMode
+import com.example.data.SettingsStore
+import com.example.util.MessageTemplates
+import com.example.util.PhoneNumbers
+import com.example.util.SmsCounter
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -32,100 +34,21 @@ import java.util.concurrent.TimeUnit
 
 class SmsSenderService(
     private val context: Context,
-    private val repository: CampaignRepository
+    private val repository: CampaignRepository,
+    private val settings: SettingsStore
 ) {
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
     companion object {
         const val SMSONLINEGH_SEND_URL = "https://api.smsonlinegh.com/v5/message/sms/send"
-        const val ACTION_SMS_SENT = "com.example.sms.ACTION_SMS_SENT"
-        const val ACTION_SMS_DELIVERED = "com.example.sms.ACTION_SMS_DELIVERED"
-        const val EXTRA_DELIVERY_ID = "extra_delivery_id"
+        private const val GATEWAY_BATCH_SIZE = 100
+        private const val SIM_SEND_SPACING_MS = 150L
     }
 
-    private var receiversRegistered = false
-
-    private val sentReceiver = object : BroadcastReceiver() {
-        override fun onReceive(ctx: Context?, intent: Intent?) {
-            val deliveryId = intent?.getLongExtra(EXTRA_DELIVERY_ID, -1L) ?: -1L
-            if (deliveryId <= 0L) return
-            val code = resultCode
-            serviceScope.launch {
-                if (code == Activity.RESULT_OK) {
-                    repository.updateRecipientStatusAndRefreshBroadcast(
-                        deliveryId = deliveryId,
-                        newStatus = "SENT",
-                        errorDetail = null
-                    )
-                } else {
-                    val errorMsg = when (code) {
-                        SmsManager.RESULT_ERROR_GENERIC_FAILURE -> "Carrier generic failure (check SIM credit/plan)"
-                        SmsManager.RESULT_ERROR_NO_SERVICE -> "No cellular network service"
-                        SmsManager.RESULT_ERROR_NULL_PDU -> "Invalid message format (Null PDU)"
-                        SmsManager.RESULT_ERROR_RADIO_OFF -> "Cellular radio / Airplane mode is on"
-                        SmsManager.RESULT_ERROR_LIMIT_EXCEEDED -> "SMS sending limit exceeded"
-                        SmsManager.RESULT_ERROR_SHORT_CODE_NOT_ALLOWED -> "Short code not allowed"
-                        else -> "SMS error (code $code)"
-                    }
-                    repository.updateRecipientStatusAndRefreshBroadcast(
-                        deliveryId = deliveryId,
-                        newStatus = "FAILED",
-                        errorDetail = errorMsg
-                    )
-                }
-            }
-        }
-    }
-
-    private val deliveredReceiver = object : BroadcastReceiver() {
-        override fun onReceive(ctx: Context?, intent: Intent?) {
-            val deliveryId = intent?.getLongExtra(EXTRA_DELIVERY_ID, -1L) ?: -1L
-            if (deliveryId <= 0L) return
-            val code = resultCode
-            serviceScope.launch {
-                if (code == Activity.RESULT_OK) {
-                    repository.updateRecipientStatusAndRefreshBroadcast(
-                        deliveryId = deliveryId,
-                        newStatus = "DELIVERED",
-                        errorDetail = null
-                    )
-                }
-            }
-        }
-    }
-
-    @Synchronized
-    fun ensureReceiversRegistered() {
-        if (receiversRegistered) return
-        try {
-            ContextCompat.registerReceiver(
-                context.applicationContext,
-                sentReceiver,
-                IntentFilter(ACTION_SMS_SENT),
-                ContextCompat.RECEIVER_NOT_EXPORTED
-            )
-            ContextCompat.registerReceiver(
-                context.applicationContext,
-                deliveredReceiver,
-                IntentFilter(ACTION_SMS_DELIVERED),
-                ContextCompat.RECEIVER_NOT_EXPORTED
-            )
-            receiversRegistered = true
-        } catch (_: Exception) {
-            // Ignore in headless unit test environments
-        }
-    }
-
-    fun isSmsOnlineGhApiKeyConfigured(): Boolean {
-        val key = BuildConfig.SMSONLINEGH_API_KEY.trim()
-        return key.isNotEmpty() &&
-            key != "YOUR_SMSONLINEGH_API_KEY" &&
-            key != "MY_SMSONLINEGH_API_KEY"
-    }
+    fun isSmsOnlineGhApiKeyConfigured(): Boolean = settings.effectiveApiKey() != null
 
     fun hasSendSmsPermission(): Boolean {
         return ContextCompat.checkSelfPermission(
@@ -143,179 +66,163 @@ class SmsSenderService(
         }
     }
 
+    /** Text actually sent: smart quotes and dashes flattened so they don't force Unicode billing. */
+    private fun prepareText(message: String): String = SmsCounter.simplifyPunctuation(message.trim())
+
     /**
-     * Sends SMS via the official SMSOnlineGH v5 API (https://dev.smsonlinegh.com/).
-     * Endpoint: POST https://api.smsonlinegh.com/v5/message/sms/send
-     * Headers:
-     *   Content-Type: application/json
-     *   Accept: application/json
-     *   Authorization: key <SMSONLINEGH_API_KEY>
-     * Payload:
-     *   { "text": "...", "type": 0, "sender": "<SenderID>", "destinations": ["..."] }
+     * Sends via the SMSOnlineGH v5 API (https://dev.smsonlinegh.com/).
+     * POST https://api.smsonlinegh.com/v5/message/sms/send
+     * Headers: Content-Type/Accept: application/json, Authorization: key <API_KEY>
+     * Payload: { "text": "...", "type": 0, "sender": "<SenderID>", "destinations": ["233..."] }
+     *
+     * Messages without {name} are identical for everyone, so they go out in batches of
+     * [GATEWAY_BATCH_SIZE] numbers per request. Personalised messages need one request each.
      */
     suspend fun sendViaSmsOnlineGh(
         senderId: String,
         candidateLabel: String,
         messageTemplate: String,
-        recipients: List<ContactEntity>
+        recipients: List<ContactEntity>,
+        onBroadcastCreated: (Long) -> Unit = {}
     ): Long = withContext(Dispatchers.IO) {
-        val cleanSender = senderId.trim().take(11).ifEmpty { "CAMPAIGN" }
-        val apiKey = BuildConfig.SMSONLINEGH_API_KEY.trim()
+        val cleanSender = senderId.trim().take(11)
+        val text = prepareText(messageTemplate)
+        val apiKey = settings.effectiveApiKey()
 
-        if (!isSmsOnlineGhApiKeyConfigured()) {
-            val (broadcastId, deliveries) = repository.createBroadcastWithRecipients(
+        val setupProblem = when {
+            apiKey == null -> "SMS Online GH is not set up. Add your API key in Settings."
+            cleanSender.isEmpty() -> "Choose a sender name in Settings before sending with SMS Online GH."
+            else -> null
+        }
+        if (setupProblem != null) {
+            val (broadcastId, _) = repository.createBroadcastWithRecipients(
                 senderIdUsed = cleanSender,
                 candidateLabel = candidateLabel,
-                messageText = messageTemplate,
+                messageText = text,
                 recipients = recipients,
-                sendMode = "SMSONLINEGH",
-                initialOverallStatus = "FAILED",
-                initialStatusDetail = "SMSONLINEGH_API_KEY is not set. Add your SMSOnlineGH API key in the AI Studio Secrets panel.",
-                initialRecipientStatus = "FAILED"
+                sendMode = SendMode.SMSONLINEGH,
+                initialOverallStatus = BroadcastStatus.FAILED,
+                initialStatusDetail = setupProblem,
+                initialRecipientStatus = DeliveryStatus.FAILED,
+                initialRecipientDetail = setupProblem
             )
-            deliveries.forEach {
-                repository.updateRecipientStatusAndRefreshBroadcast(
-                    it.id,
-                    "FAILED",
-                    "Missing SMSONLINEGH_API_KEY in AI Studio Secrets"
-                )
-            }
+            onBroadcastCreated(broadcastId)
             return@withContext broadcastId
         }
 
         val (broadcastId, deliveries) = repository.createBroadcastWithRecipients(
             senderIdUsed = cleanSender,
             candidateLabel = candidateLabel,
-            messageText = messageTemplate,
+            messageText = text,
             recipients = recipients,
-            sendMode = "SMSONLINEGH",
-            initialOverallStatus = "SENDING",
-            initialStatusDetail = "Submitting ${recipients.size} message(s) to SMSOnlineGH under Sender ID '$cleanSender'...",
-            initialRecipientStatus = "SENDING"
+            sendMode = SendMode.SMSONLINEGH,
+            initialOverallStatus = BroadcastStatus.SENDING,
+            initialStatusDetail = "Sending to ${recipients.size} people…",
+            initialRecipientStatus = DeliveryStatus.SENDING
         )
+        onBroadcastCreated(broadcastId)
 
-        val jsonMediaType = "application/json; charset=utf-8".toMediaType()
-
-        deliveries.forEach { delivery ->
-            try {
-                val personalizedText = personalizeMessage(messageTemplate, delivery.contactName)
-                val formattedDestination = formatGhanaOrIntlPhone(delivery.phoneNumber)
-
-                val payloadJson = JSONObject().apply {
-                    put("text", personalizedText)
-                    put("type", 0)
-                    put("sender", cleanSender)
-                    put("destinations", JSONArray().put(formattedDestination))
-                }.toString()
-
-                val request = Request.Builder()
-                    .url(SMSONLINEGH_SEND_URL)
-                    .addHeader("Content-Type", "application/json")
-                    .addHeader("Accept", "application/json")
-                    .addHeader("Authorization", "key $apiKey")
-                    .post(payloadJson.toRequestBody(jsonMediaType))
-                    .build()
-
-                httpClient.newCall(request).execute().use { response ->
-                    val rawBody = response.body?.string().orEmpty()
-                    val parsedJson = try {
-                        if (rawBody.isNotBlank()) JSONObject(rawBody) else null
-                    } catch (_: Exception) {
-                        null
-                    }
-
-                    val handshake = parsedJson?.optJSONObject("handshake")
-                    val handshakeId = handshake?.optInt("id", -1) ?: -1
-                    val handshakeLabel = handshake?.optString("label", "").orEmpty()
-
-                    if (response.isSuccessful && (handshakeId == 0 || handshakeLabel.equals("HSHK_OK", ignoreCase = true))) {
-                        // Inspect per-destination status in data.destinations if present
-                        val destArray = parsedJson?.optJSONObject("data")?.optJSONArray("destinations")
-                        val firstDest = if (destArray != null && destArray.length() > 0) {
-                            destArray.optJSONObject(0)
-                        } else {
-                            null
-                        }
-                        val destStatusObj = firstDest?.optJSONObject("status")
-                        val destStatusLabel = destStatusObj?.optString("label", "HSHK_OK").orEmpty()
-
-                        when {
-                            destStatusLabel.contains("REJECTED", ignoreCase = true) ||
-                                destStatusLabel.contains("UNDELIVERED", ignoreCase = true) ||
-                                destStatusLabel.contains("EXPIRED", ignoreCase = true) -> {
-                                repository.updateRecipientStatusAndRefreshBroadcast(
-                                    deliveryId = delivery.id,
-                                    newStatus = "FAILED",
-                                    errorDetail = "SMSOnlineGH rejected: $destStatusLabel"
-                                )
-                            }
-                            destStatusLabel.equals("DS_DELIVERED", ignoreCase = true) -> {
-                                repository.updateRecipientStatusAndRefreshBroadcast(
-                                    deliveryId = delivery.id,
-                                    newStatus = "DELIVERED",
-                                    errorDetail = "DS_DELIVERED"
-                                )
-                            }
-                            else -> {
-                                // Honest status: submitted & accepted by SMSOnlineGH (HSHK_OK / DS_PENDING_ENROUTE)
-                                repository.updateRecipientStatusAndRefreshBroadcast(
-                                    deliveryId = delivery.id,
-                                    newStatus = "SUBMITTED",
-                                    errorDetail = destStatusLabel.ifBlank { "HSHK_OK" }
-                                )
-                            }
-                        }
-                    } else {
-                        val reason = when {
-                            handshakeLabel.isNotBlank() -> "SMSOnlineGH: $handshakeLabel"
-                            !response.isSuccessful -> "SMSOnlineGH HTTP ${response.code}"
-                            else -> "SMSOnlineGH rejected request"
-                        }
-                        repository.updateRecipientStatusAndRefreshBroadcast(
-                            deliveryId = delivery.id,
-                            newStatus = "FAILED",
-                            errorDetail = reason
-                        )
-                    }
-                }
-            } catch (e: Exception) {
-                repository.updateRecipientStatusAndRefreshBroadcast(
-                    deliveryId = delivery.id,
-                    newStatus = "FAILED",
-                    errorDetail = "Network error: ${e.localizedMessage ?: "Could not reach api.smsonlinegh.com"}"
-                )
+        if (MessageTemplates.containsName(text)) {
+            deliveries.forEach { delivery ->
+                val personal = MessageTemplates.personalize(text, delivery.contactName)
+                submitToGateway(apiKey!!, cleanSender, personal, listOf(delivery))
+            }
+        } else {
+            deliveries.chunked(GATEWAY_BATCH_SIZE).forEach { batch ->
+                submitToGateway(apiKey!!, cleanSender, text, batch)
             }
         }
-
         broadcastId
     }
 
-    /**
-     * Dispatches SMS messages directly via Android SmsManager.
-     */
-    suspend fun sendViaDirectSim(
-        senderId: String,
-        candidateLabel: String,
-        messageTemplate: String,
-        recipients: List<ContactEntity>
-    ): Long = withContext(Dispatchers.IO) {
-        ensureReceiversRegistered()
+    private suspend fun submitToGateway(
+        apiKey: String,
+        sender: String,
+        text: String,
+        batch: List<RecipientDeliveryEntity>
+    ) {
+        val numbers = batch.map { PhoneNumbers.toInternational(it.phoneNumber) }
+        val payload = JSONObject().apply {
+            put("text", text)
+            put("type", 0)
+            put("sender", sender)
+            put("destinations", JSONArray(numbers))
+        }.toString()
 
-        if (!hasSendSmsPermission()) {
-            val (broadcastId, _) = repository.createBroadcastWithRecipients(
-                senderIdUsed = senderId,
-                candidateLabel = candidateLabel,
-                messageText = messageTemplate,
-                recipients = recipients,
-                sendMode = "DIRECT_SIM",
-                initialOverallStatus = "FAILED",
-                initialStatusDetail = "Failed: SEND_SMS permission was not granted.",
-                initialRecipientStatus = "FAILED"
-            )
-            return@withContext broadcastId
+        val request = Request.Builder()
+            .url(SMSONLINEGH_SEND_URL)
+            .addHeader("Accept", "application/json")
+            .addHeader("Authorization", "key $apiKey")
+            .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val outcome: List<Pair<String, String?>> = try {
+            httpClient.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                val handshake = json?.optJSONObject("handshake")
+                val handshakeOk = handshake?.optInt("id", -1) == 0 ||
+                    handshake?.optString("label").equals("HSHK_OK", ignoreCase = true)
+
+                if (response.isSuccessful && handshakeOk) {
+                    val destinations = json?.optJSONObject("data")?.optJSONArray("destinations")
+                    numbers.mapIndexed { index, number ->
+                        classifyDestination(findDestination(destinations, number, index))
+                    }
+                } else {
+                    val reason = describeGatewayError(response.code, handshake?.optString("label").orEmpty())
+                    numbers.map { DeliveryStatus.FAILED to reason }
+                }
+            }
+        } catch (e: Exception) {
+            val reason = "No internet connection, or SMS Online GH could not be reached."
+            numbers.map { DeliveryStatus.FAILED to reason }
         }
 
-        val simReady = isSimReady()
+        batch.zip(outcome).forEach { (delivery, result) ->
+            repository.updateRecipientStatusAndRefreshBroadcast(delivery.id, result.first, result.second)
+        }
+    }
+
+    private fun findDestination(destinations: JSONArray?, number: String, index: Int): JSONObject? {
+        if (destinations == null) return null
+        for (i in 0 until destinations.length()) {
+            val item = destinations.optJSONObject(i) ?: continue
+            val to = item.optString("to").ifBlank { item.optString("destination") }.filter { it.isDigit() }
+            if (to.isNotEmpty() && to == number) return item
+        }
+        return destinations.optJSONObject(index)
+    }
+
+    private fun classifyDestination(destination: JSONObject?): Pair<String, String?> {
+        val label = destination?.optJSONObject("status")?.optString("label").orEmpty()
+        return when {
+            label.equals("DS_DELIVERED", ignoreCase = true) -> DeliveryStatus.DELIVERED to null
+            listOf("REJECT", "UNDELIV", "EXPIRED", "INVALID", "FAIL", "ERR").any { label.contains(it, ignoreCase = true) } ->
+                DeliveryStatus.FAILED to "Rejected by SMS Online GH ($label). Check the number."
+            else -> DeliveryStatus.SUBMITTED to null
+        }
+    }
+
+    private fun describeGatewayError(httpCode: Int, label: String): String = when {
+        httpCode == 401 || httpCode == 403 || label.contains("AUTH", ignoreCase = true) ->
+            "SMS Online GH did not accept your API key. Check it in Settings."
+        label.contains("BALANCE", ignoreCase = true) || label.contains("CREDIT", ignoreCase = true) ->
+            "Not enough SMS credit on your SMS Online GH account."
+        label.contains("SENDER", ignoreCase = true) ->
+            "The sender name is not approved on your SMS Online GH account."
+        label.isNotBlank() -> "SMS Online GH refused the message ($label)."
+        else -> "SMS Online GH could not send the message (error $httpCode)."
+    }
+
+    /** Sends through the phone's own SIM using SmsManager. Costs the user's airtime or bundle. */
+    suspend fun sendViaDirectSim(
+        candidateLabel: String,
+        messageTemplate: String,
+        recipients: List<ContactEntity>,
+        onBroadcastCreated: (Long) -> Unit = {}
+    ): Long = withContext(Dispatchers.IO) {
+        val text = prepareText(messageTemplate)
         val smsManager: SmsManager? = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 context.getSystemService(SmsManager::class.java)
@@ -327,159 +234,117 @@ class SmsSenderService(
             null
         }
 
-        if (smsManager == null) {
-            val (broadcastId, deliveries) = repository.createBroadcastWithRecipients(
-                senderIdUsed = senderId,
+        val setupProblem = when {
+            !hasSendSmsPermission() -> "Dawuro is not allowed to send SMS. Allow it in your phone settings."
+            smsManager == null -> "This device cannot send SMS."
+            !isSimReady() -> "No SIM card is ready. Check that your SIM is inserted and has signal."
+            else -> null
+        }
+        if (setupProblem != null) {
+            val (broadcastId, _) = repository.createBroadcastWithRecipients(
+                senderIdUsed = "",
                 candidateLabel = candidateLabel,
-                messageText = messageTemplate,
+                messageText = text,
                 recipients = recipients,
-                sendMode = "DIRECT_SIM",
-                initialOverallStatus = "FAILED",
-                initialStatusDetail = "Failed: Device does not support cellular SMS.",
-                initialRecipientStatus = "FAILED"
+                sendMode = SendMode.DIRECT_SIM,
+                initialOverallStatus = BroadcastStatus.FAILED,
+                initialStatusDetail = setupProblem,
+                initialRecipientStatus = DeliveryStatus.FAILED,
+                initialRecipientDetail = setupProblem
             )
-            deliveries.forEach {
-                repository.updateRecipientStatusAndRefreshBroadcast(
-                    it.id,
-                    "FAILED",
-                    "No cellular SMS hardware available"
-                )
-            }
+            onBroadcastCreated(broadcastId)
             return@withContext broadcastId
         }
 
         val (broadcastId, deliveries) = repository.createBroadcastWithRecipients(
-            senderIdUsed = senderId,
+            senderIdUsed = "",
             candidateLabel = candidateLabel,
-            messageText = messageTemplate,
+            messageText = text,
             recipients = recipients,
-            sendMode = "DIRECT_SIM",
-            initialOverallStatus = "SENDING",
-            initialStatusDetail = "Dispatching ${recipients.size} SMS message(s) via SIM...",
-            initialRecipientStatus = "SENDING"
+            sendMode = SendMode.DIRECT_SIM,
+            initialOverallStatus = BroadcastStatus.SENDING,
+            initialStatusDetail = "Sending to ${recipients.size} people…",
+            initialRecipientStatus = DeliveryStatus.SENDING
         )
+        onBroadcastCreated(broadcastId)
 
-        val immutableFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
 
         deliveries.forEach { delivery ->
             try {
-                val personalizedMessage = personalizeMessage(messageTemplate, delivery.contactName)
-
-                val sentIntent = Intent(ACTION_SMS_SENT).apply {
-                    setPackage(context.packageName)
-                    putExtra(EXTRA_DELIVERY_ID, delivery.id)
-                }
-                val deliveredIntent = Intent(ACTION_SMS_DELIVERED).apply {
-                    setPackage(context.packageName)
-                    putExtra(EXTRA_DELIVERY_ID, delivery.id)
-                }
-
-                val sentPi = PendingIntent.getBroadcast(
-                    context,
-                    (delivery.id * 2).toInt(),
-                    sentIntent,
-                    immutableFlag
-                )
-                val deliveredPi = PendingIntent.getBroadcast(
-                    context,
-                    (delivery.id * 2 + 1).toInt(),
-                    deliveredIntent,
-                    immutableFlag
-                )
-
-                val parts = smsManager.divideMessage(personalizedMessage)
+                val personal = MessageTemplates.personalize(text, delivery.contactName)
+                val sentPi = statusIntent(SmsStatusReceiver.ACTION_SMS_SENT, delivery.id, flags)
+                val deliveredPi = statusIntent(SmsStatusReceiver.ACTION_SMS_DELIVERED, delivery.id, flags)
+                val parts = smsManager!!.divideMessage(personal)
                 if (parts.size <= 1) {
-                    smsManager.sendTextMessage(
-                        delivery.phoneNumber,
-                        null,
-                        personalizedMessage,
-                        sentPi,
-                        deliveredPi
-                    )
+                    smsManager.sendTextMessage(delivery.phoneNumber, null, personal, sentPi, deliveredPi)
                 } else {
-                    val sentIntents = ArrayList<PendingIntent>(parts.size).apply {
-                        repeat(parts.size) { add(sentPi) }
-                    }
-                    val deliveredIntents = ArrayList<PendingIntent>(parts.size).apply {
-                        repeat(parts.size) { add(deliveredPi) }
-                    }
                     smsManager.sendMultipartTextMessage(
                         delivery.phoneNumber,
                         null,
                         parts,
-                        sentIntents,
-                        deliveredIntents
+                        ArrayList(List(parts.size) { sentPi }),
+                        ArrayList(List(parts.size) { deliveredPi })
                     )
                 }
             } catch (e: Exception) {
                 repository.updateRecipientStatusAndRefreshBroadcast(
                     deliveryId = delivery.id,
-                    newStatus = "FAILED",
-                    errorDetail = e.localizedMessage ?: "Failed to queue SMS on SIM"
+                    newStatus = DeliveryStatus.FAILED,
+                    errorDetail = "The SMS could not be queued on your SIM."
                 )
             }
-        }
-
-        serviceScope.launch {
-            delay(4000)
-            if (!simReady) {
-                deliveries.forEach { d ->
-                    repository.updateRecipientStatusAndRefreshBroadcast(
-                        deliveryId = d.id,
-                        newStatus = "FAILED",
-                        errorDetail = "No active SIM card detected. Use SMSOnlineGH or Device SMS App."
-                    )
-                }
-            }
+            // Spacing out sends keeps the phone's SMS queue from choking on large lists.
+            delay(SIM_SEND_SPACING_MS)
         }
 
         broadcastId
     }
 
+    private fun statusIntent(action: String, deliveryId: Long, flags: Int): PendingIntent {
+        val intent = Intent(context, SmsStatusReceiver::class.java).apply {
+            this.action = action
+            putExtra(SmsStatusReceiver.EXTRA_DELIVERY_ID, deliveryId)
+        }
+        val offset = if (action == SmsStatusReceiver.ACTION_SMS_SENT) 0 else 1
+        return PendingIntent.getBroadcast(context, (deliveryId * 2 + offset).toInt(), intent, flags)
+    }
+
     /**
-     * Opens the device's default SMS application pre-populated with all selected recipient numbers
-     * and the campaign message.
+     * Opens the phone's default SMS app pre-filled with the recipients and message. The user
+     * presses send there, so Dawuro cannot track delivery.
      */
     suspend fun sendViaSystemSmsApp(
         activityContext: Context,
-        senderId: String,
         candidateLabel: String,
         messageTemplate: String,
-        recipients: List<ContactEntity>
+        recipients: List<ContactEntity>,
+        onBroadcastCreated: (Long) -> Unit = {}
     ): Pair<Long, Boolean> {
+        val text = prepareText(messageTemplate)
         val (broadcastId, deliveries) = withContext(Dispatchers.IO) {
             repository.createBroadcastWithRecipients(
-                senderIdUsed = senderId,
+                senderIdUsed = "",
                 candidateLabel = candidateLabel,
-                messageText = messageTemplate,
+                messageText = text,
                 recipients = recipients,
-                sendMode = "SMS_APP",
-                initialOverallStatus = "OPENED_IN_SMS_APP",
-                initialStatusDetail = "Opened in device SMS app (${recipients.size} recipient(s)). Tap send in your SMS app to complete.",
-                initialRecipientStatus = "OPENED_IN_APP"
+                sendMode = SendMode.SMS_APP,
+                initialOverallStatus = BroadcastStatus.OPENED_IN_SMS_APP,
+                initialStatusDetail = "Opened in your Messages app. Press send there to finish.",
+                initialRecipientStatus = DeliveryStatus.OPENED_IN_APP
             )
         }
+        onBroadcastCreated(broadcastId)
 
         val separator = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) "," else ";"
         val numbersJoined = recipients.joinToString(separator) { it.phoneNumber }
-        val resolvedBody = if (recipients.size == 1) {
-            personalizeMessage(messageTemplate, recipients.first().name)
-        } else {
-            messageTemplate.replace("{name}", "Delegate", ignoreCase = true)
-        }
+        // One shared message can't greet each person by name, so {name} is dropped.
+        val body = MessageTemplates.personalize(text, recipients.singleOrNull()?.name)
 
         val launched = try {
-            val smsUri = Uri.parse("smsto:${Uri.encode(numbersJoined)}")
-            val intent = Intent(Intent.ACTION_SENDTO, smsUri).apply {
-                putExtra("sms_body", resolvedBody)
-                putExtra(Intent.EXTRA_TEXT, resolvedBody)
-                if (activityContext !is Activity) {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
+            val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$numbersJoined")).apply {
+                putExtra("sms_body", body)
+                if (activityContext !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             activityContext.startActivity(intent)
             true
@@ -488,8 +353,8 @@ class SmsSenderService(
                 deliveries.forEach { d ->
                     repository.updateRecipientStatusAndRefreshBroadcast(
                         deliveryId = d.id,
-                        newStatus = "FAILED",
-                        errorDetail = "No default SMS app found on device"
+                        newStatus = DeliveryStatus.FAILED,
+                        errorDetail = "No Messages app was found on this phone."
                     )
                 }
             }
@@ -497,21 +362,5 @@ class SmsSenderService(
         }
 
         return broadcastId to launched
-    }
-
-    private fun formatGhanaOrIntlPhone(raw: String): String {
-        val digitsOnly = raw.filter { it.isDigit() }
-        return if (digitsOnly.length == 10 && digitsOnly.startsWith("0")) {
-            "233" + digitsOnly.substring(1)
-        } else {
-            digitsOnly
-        }
-    }
-
-    private fun personalizeMessage(template: String, contactName: String): String {
-        val cleanName = contactName.trim().ifEmpty { "Delegate" }
-        return template
-            .replace("{name}", cleanName, ignoreCase = true)
-            .replace("{\$name}", cleanName, ignoreCase = true)
     }
 }

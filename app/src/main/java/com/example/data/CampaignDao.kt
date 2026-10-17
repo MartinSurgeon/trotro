@@ -40,6 +40,12 @@ interface CampaignDao {
     @Query("UPDATE contacts SET isSelected = CASE WHEN LOWER(groupTag) = LOWER(:groupTag) THEN 1 ELSE 0 END")
     suspend fun selectContactsOnlyInGroup(groupTag: String)
 
+    @Query("UPDATE contacts SET isSelected = :selected WHERE LOWER(TRIM(groupTag)) = LOWER(TRIM(:groupTag))")
+    suspend fun setGroupSelected(groupTag: String, selected: Boolean)
+
+    @Query("UPDATE contacts SET groupTag = :newName WHERE LOWER(TRIM(groupTag)) = LOWER(TRIM(:oldName))")
+    suspend fun renameGroup(oldName: String, newName: String)
+
     // --- Sender IDs (Multiple Candidates / Organisers) ---
     @Query("SELECT * FROM sender_ids ORDER BY isDefault DESC, senderName ASC")
     fun observeAllSenderIds(): Flow<List<SenderIdEntity>>
@@ -90,6 +96,33 @@ interface CampaignDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRecipientDelivery(delivery: RecipientDeliveryEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRecipientDeliveries(deliveries: List<RecipientDeliveryEntity>): List<Long>
+
+    @Query(
+        """
+        SELECT broadcastId,
+            COUNT(*) AS total,
+            SUM(CASE WHEN status = 'DELIVERED' THEN 1 ELSE 0 END) AS delivered,
+            SUM(CASE WHEN status IN ('SENT', 'SUBMITTED') THEN 1 ELSE 0 END) AS sent,
+            SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+            SUM(CASE WHEN status = 'SENDING' THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN status = 'OPENED_IN_APP' THEN 1 ELSE 0 END) AS openedInApp
+        FROM recipient_deliveries
+        GROUP BY broadcastId
+        """
+    )
+    fun observeBroadcastCounts(): Flow<List<BroadcastCounts>>
+
+    @Query("SELECT DISTINCT broadcastId FROM recipient_deliveries WHERE status = 'SENDING' AND updatedAt < :before")
+    suspend fun getBroadcastIdsWithStaleSending(before: Long): List<Long>
+
+    @Query(
+        "UPDATE recipient_deliveries SET status = 'FAILED', errorDetail = :reason, updatedAt = :now " +
+            "WHERE status = 'SENDING' AND updatedAt < :before"
+    )
+    suspend fun failStaleSending(before: Long, reason: String, now: Long = System.currentTimeMillis())
 
     @Query("SELECT * FROM recipient_deliveries WHERE broadcastId = :broadcastId ORDER BY contactName ASC")
     fun observeDeliveriesForBroadcast(broadcastId: Long): Flow<List<RecipientDeliveryEntity>>

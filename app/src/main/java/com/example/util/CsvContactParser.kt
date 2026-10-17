@@ -8,6 +8,8 @@ data class CsvParseResult(
 )
 
 object CsvContactParser {
+    /** Excel adds this invisible marker to the start of UTF-8 CSV files. */
+    private val BYTE_ORDER_MARK = 0xFEFF.toChar().toString()
 
     /**
      * Parses CSV content into ContactEntity objects.
@@ -17,9 +19,12 @@ object CsvContactParser {
      * - Single column of phone numbers
      * - Comma, semicolon, or tab delimiters
      * - Header row detection (e.g., "name,phone", "Full Name,Mobile")
+     * - Excel's UTF-8 byte order mark and numbers that lost their leading zero
+     * Rows repeating a number already seen earlier in the file are dropped.
      */
     fun parseCsv(rawText: String): CsvParseResult {
         val lines = rawText
+            .removePrefix(BYTE_ORDER_MARK)
             .lineSequence()
             .map { it.trim() }
             .filter { it.isNotEmpty() }
@@ -30,11 +35,18 @@ object CsvContactParser {
         }
 
         val parsedContacts = mutableListOf<ContactEntity>()
+        val seenKeys = mutableSetOf<String>()
         var skipped = 0
+
+        fun addContact(name: String, phone: String, group: String) {
+            if (seenKeys.add(PhoneNumbers.dedupeKey(phone))) {
+                parsedContacts.add(ContactEntity(name = name, phoneNumber = phone, groupTag = group, isSelected = true))
+            }
+        }
 
         lines.forEachIndexed { index, line ->
             val columns = splitCsvLine(line)
-            if (columns.isEmpty()) {
+            if (columns.all { it.isBlank() }) {
                 skipped++
                 return@forEachIndexed
             }
@@ -44,54 +56,22 @@ object CsvContactParser {
                 return@forEachIndexed
             }
 
+            if (columns.size == 1) {
+                val phone = PhoneNumbers.normalize(columns[0])
+                if (phone != null) addContact("", phone, "") else skipped++
+                return@forEachIndexed
+            }
+
+            val col0 = columns[0].trim()
+            val col1 = columns[1].trim()
+            val group = columns.getOrNull(2)?.trim().orEmpty()
+
+            val phoneInCol1 = PhoneNumbers.normalize(col1)
+            val phoneInCol0 = PhoneNumbers.normalize(col0)
             when {
-                columns.size == 1 -> {
-                    val rawPhone = sanitizePhone(columns[0])
-                    if (isValidPhone(rawPhone)) {
-                        parsedContacts.add(
-                            ContactEntity(
-                                name = "Contact $rawPhone",
-                                phoneNumber = rawPhone,
-                                groupTag = "Imported",
-                                isSelected = true
-                            )
-                        )
-                    } else {
-                        skipped++
-                    }
-                }
-                else -> {
-                    val col0 = columns[0].trim()
-                    val col1 = columns[1].trim()
-                    val col2 = columns.getOrNull(2)?.trim()?.takeIf { it.isNotEmpty() } ?: "Imported"
-
-                    val col0Phone = sanitizePhone(col0)
-                    val col1Phone = sanitizePhone(col1)
-
-                    if (isValidPhone(col1Phone)) {
-                        val name = col0.ifEmpty { "Contact $col1Phone" }
-                        parsedContacts.add(
-                            ContactEntity(
-                                name = name,
-                                phoneNumber = col1Phone,
-                                groupTag = col2,
-                                isSelected = true
-                            )
-                        )
-                    } else if (isValidPhone(col0Phone)) {
-                        val name = col1.ifEmpty { "Contact $col0Phone" }
-                        parsedContacts.add(
-                            ContactEntity(
-                                name = name,
-                                phoneNumber = col0Phone,
-                                groupTag = col2,
-                                isSelected = true
-                            )
-                        )
-                    } else {
-                        skipped++
-                    }
-                }
+                phoneInCol1 != null -> addContact(col0, phoneInCol1, group)
+                phoneInCol0 != null -> addContact(col1, phoneInCol0, group)
+                else -> skipped++
             }
         }
 
@@ -108,25 +88,6 @@ object CsvContactParser {
             joined.contains("tel")
         val hasDigits = joined.count { it.isDigit() } >= 6
         return hasHeaderWord && !hasDigits
-    }
-
-    fun sanitizePhone(raw: String): String {
-        val trimmed = raw.trim()
-        val sb = StringBuilder()
-        for (i in trimmed.indices) {
-            val c = trimmed[i]
-            if (c == '+' && sb.isEmpty()) {
-                sb.append(c)
-            } else if (c.isDigit()) {
-                sb.append(c)
-            }
-        }
-        return sb.toString()
-    }
-
-    fun isValidPhone(sanitized: String): Boolean {
-        val digitsCount = sanitized.count { it.isDigit() }
-        return digitsCount in 6..16
     }
 
     private fun splitCsvLine(line: String): List<String> {

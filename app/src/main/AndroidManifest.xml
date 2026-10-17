@@ -7,10 +7,10 @@
         android:name="android.hardware.telephony"
         android:required="false" />
 
-    <!-- Direct SIM SMS permission (requested at runtime when using SIM Card Direct mode) -->
+    <!-- Sending from the user's SIM (requested at runtime when "My SIM card" is chosen) -->
     <uses-permission android:name="android.permission.SEND_SMS" />
 
-    <!-- Network permission for optional SMS Gateway API service -->
+    <!-- Needed for the optional SMS Online GH gateway -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <queries>
@@ -28,19 +28,24 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.MyApplication">
+        android:theme="@style/Theme.Dawuro">
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.MyApplication">
+            android:theme="@style/Theme.Dawuro">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Records "sent" and "delivered" reports for SIM messages, even if the app was closed. -->
+        <receiver
+            android:name=".sms.SmsStatusReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

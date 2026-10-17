@@ -1,442 +1,409 @@
 package com.example.ui.screens
 
-import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.BorderStroke
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Badge
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.CloudDone
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.OpenInNew
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.LocalSnackbarHostState
+import com.example.data.BroadcastCounts
+import com.example.data.DeliveryStatus
 import com.example.data.MessageBroadcastEntity
 import com.example.data.RecipientDeliveryEntity
+import com.example.data.SendMode
+import com.example.ui.components.ConfirmDialog
+import com.example.ui.components.EmptyState
+import com.example.ui.components.PrimaryActionButton
+import com.example.ui.components.ScreenTitleBar
+import com.example.ui.components.StatusPill
+import com.example.ui.components.StatusTone
+import com.example.ui.components.broadcastStatusLabel
+import com.example.ui.components.deliveryStatusLabel
+import com.example.ui.components.formatWhen
+import com.example.ui.components.peopleCount
+import com.example.ui.components.toneColor
+import com.example.util.PhoneNumbers
 import com.example.viewmodel.CampaignUiState
 import kotlinx.coroutines.flow.Flow
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import kotlinx.coroutines.launch
+
+private fun sendModeLabel(mode: String): String = when (mode) {
+    SendMode.SMS_APP -> "Messages app"
+    SendMode.DIRECT_SIM -> "My SIM"
+    else -> "SMS Online GH"
+}
 
 @Composable
 fun HistoryScreen(
     uiState: CampaignUiState,
     observeDeliveries: (Long) -> Flow<List<RecipientDeliveryEntity>>,
-    onBackToHome: () -> Unit,
+    onOpenBroadcast: (Long?) -> Unit,
     onReuseMessage: (String) -> Unit,
+    onRetryFailed: (Long) -> Unit,
     onDeleteBroadcast: (Long) -> Unit,
-    onGoToSendSms: () -> Unit
+    onNewMessage: () -> Unit,
+    hasSendSmsPermission: () -> Boolean
 ) {
-    BackHandler { onBackToHome() }
+    val open = uiState.openBroadcastId?.let { id -> uiState.broadcasts.firstOrNull { it.id == id } }
+    if (open != null) {
+        BroadcastDetail(
+            broadcast = open,
+            counts = uiState.broadcastCounts[open.id],
+            isSending = uiState.isSending,
+            observeDeliveries = observeDeliveries,
+            onBack = { onOpenBroadcast(null) },
+            onReuseMessage = { onReuseMessage(open.messageText) },
+            onRetryFailed = { onRetryFailed(open.id) },
+            onDelete = { onDeleteBroadcast(open.id) },
+            hasSendSmsPermission = hasSendSmsPermission
+        )
+        return
+    }
 
-    val primaryColor = MaterialTheme.colorScheme.primary
-    val accentColor = MaterialTheme.colorScheme.secondary
-
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.TopCenter
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .widthIn(max = 600.dp)
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            ScreenTitleBar(title = "Messages")
             if (uiState.broadcasts.isEmpty()) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    shape = RoundedCornerShape(18.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Surface(
-                            shape = CircleShape,
-                            color = primaryColor.copy(alpha = 0.12f),
-                            modifier = Modifier.size(72.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.History,
-                                    contentDescription = null,
-                                    tint = primaryColor,
-                                    modifier = Modifier.size(38.dp)
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        Text(
-                            text = "No Messages Sent Yet",
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Bold,
-                            textAlign = TextAlign.Center
+                EmptyState(
+                    icon = Icons.Rounded.Forum,
+                    title = "No messages yet",
+                    message = "Messages you send will appear here, with who received them and who didn't.",
+                    modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                    action = {
+                        PrimaryActionButton(
+                            text = "Write a message",
+                            icon = Icons.AutoMirrored.Rounded.Send,
+                            onClick = onNewMessage,
+                            modifier = Modifier.widthIn(max = 320.dp).testTag("history_empty_send_sms_button")
                         )
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Text(
-                            text = "When candidates send SMS messages to delegates, each broadcast will appear here with the Sender ID, date, recipient count, and real SMSOnlineGH / carrier status.",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
-
-                        Spacer(modifier = Modifier.height(20.dp))
-
-                        Button(
-                            onClick = onGoToSendSms,
-                            modifier = Modifier
-                                .height(50.dp)
-                                .testTag("history_empty_send_sms_button"),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Icon(imageVector = Icons.AutoMirrored.Filled.Send, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Write & Send Your First SMS", fontWeight = FontWeight.Bold)
-                        }
                     }
-                }
+                )
             } else {
                 LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("history_lazy_list"),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(bottom = 24.dp)
+                    modifier = Modifier.weight(1f).fillMaxWidth().testTag("history_lazy_list"),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(uiState.broadcasts, key = { it.id }) { broadcast ->
-                        BroadcastHistoryCard(
+                        BroadcastCard(
                             broadcast = broadcast,
-                            observeDeliveries = observeDeliveries,
-                            primaryColor = primaryColor,
-                            accentColor = accentColor,
-                            onReuseMessage = { onReuseMessage(broadcast.messageText) },
-                            onDelete = { onDeleteBroadcast(broadcast.id) }
+                            counts = uiState.broadcastCounts[broadcast.id],
+                            onClick = { onOpenBroadcast(broadcast.id) }
                         )
                     }
                 }
+            }
+        }
+        if (uiState.broadcasts.isNotEmpty()) {
+            ExtendedFloatingActionButton(
+                onClick = onNewMessage,
+                icon = { Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null) },
+                text = { Text("New message") },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun BroadcastCard(broadcast: MessageBroadcastEntity, counts: BroadcastCounts?, onClick: () -> Unit) {
+    Card(
+        onClick = onClick,
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        modifier = Modifier.fillMaxWidth().testTag("history_item_${broadcast.id}")
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    formatWhen(broadcast.timestamp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                StatusPill(broadcastStatusLabel(broadcast.overallStatus))
+            }
+            Text(
+                broadcast.messageText,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                "${peopleCount(broadcast.totalRecipients)} · ${sendModeLabel(broadcast.sendMode)}" +
+                    if (broadcast.senderIdUsed.isNotBlank()) " · ${broadcast.senderIdUsed}" else "",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (counts != null && broadcast.sendMode != SendMode.SMS_APP) {
+                DeliveryProgress(counts)
             }
         }
     }
 }
 
 @Composable
-private fun BroadcastHistoryCard(
+private fun DeliveryProgress(counts: BroadcastCounts) {
+    if (counts.total == 0) return
+    val reached = counts.delivered + counts.sent
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        LinearProgressIndicator(
+            progress = { reached.toFloat() / counts.total },
+            color = toneColor(if (counts.failed > 0) StatusTone.WARNING else StatusTone.SUCCESS),
+            modifier = Modifier.fillMaxWidth()
+        )
+        val parts = buildList {
+            if (counts.delivered > 0) add("${counts.delivered} delivered")
+            if (counts.sent > 0) add("${counts.sent} sent")
+            if (counts.pending > 0) add("${counts.pending} sending")
+            if (counts.failed > 0) add("${counts.failed} not sent")
+        }
+        Text(parts.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+private enum class RecipientFilter(val label: String) { ALL("All"), FAILED("Not sent"), SENT("Sent"), DELIVERED("Delivered") }
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BroadcastDetail(
     broadcast: MessageBroadcastEntity,
+    counts: BroadcastCounts?,
+    isSending: Boolean,
     observeDeliveries: (Long) -> Flow<List<RecipientDeliveryEntity>>,
-    primaryColor: Color,
-    accentColor: Color,
+    onBack: () -> Unit,
     onReuseMessage: () -> Unit,
-    onDelete: () -> Unit
+    onRetryFailed: () -> Unit,
+    onDelete: () -> Unit,
+    hasSendSmsPermission: () -> Boolean
 ) {
-    var expanded by remember { mutableStateOf(false) }
-    val dateFormat = remember { SimpleDateFormat("MMM d, yyyy • h:mm a", Locale.getDefault()) }
-    val formattedDate = remember(broadcast.timestamp) {
-        dateFormat.format(Date(broadcast.timestamp))
+    val deliveriesFlow = remember(broadcast.id) { observeDeliveries(broadcast.id) }
+    val deliveries by deliveriesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    var filter by rememberSaveable { mutableStateOf(RecipientFilter.ALL) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    val snackbar = LocalSnackbarHostState.current
+    val scope = rememberCoroutineScope()
+
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) onRetryFailed() else scope.launch { snackbar.showSnackbar("Allow SMS permission to retry from your SIM") }
     }
 
-    val (badgeText, badgeColor, badgeIcon) = when (broadcast.overallStatus) {
-        "DELIVERED" -> Triple("Delivered", Color(0xFF1B5E20), Icons.Default.CheckCircle)
-        "SUBMITTED_TO_GATEWAY" -> Triple("SMSOnlineGH Accepted", primaryColor, Icons.Default.CloudDone)
-        "SENT_TO_CARRIER" -> Triple("Sent to Carrier", primaryColor, Icons.Default.CheckCircle)
-        "OPENED_IN_SMS_APP" -> Triple("Opened in SMS App", Color(0xFF0D47A1), Icons.Default.OpenInNew)
-        "PARTIAL" -> Triple("Partially Sent", Color(0xFFE65100), Icons.Default.Schedule)
-        "FAILED" -> Triple("Send Failed", accentColor, Icons.Default.ErrorOutline)
-        else -> Triple("Sending...", Color(0xFF6A1B9A), Icons.Default.Schedule)
+    val failedCount = counts?.failed ?: deliveries.count { it.status == DeliveryStatus.FAILED }
+    val visible = deliveries.filter {
+        when (filter) {
+            RecipientFilter.ALL -> true
+            RecipientFilter.FAILED -> it.status == DeliveryStatus.FAILED
+            RecipientFilter.SENT -> it.status == DeliveryStatus.SENT || it.status == DeliveryStatus.SUBMITTED
+            RecipientFilter.DELIVERED -> it.status == DeliveryStatus.DELIVERED
+        }
     }
 
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("history_item_${broadcast.id}"),
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+    Column(modifier = Modifier.fillMaxSize()) {
+        ScreenTitleBar(
+            title = formatWhen(broadcast.timestamp),
+            onBack = onBack,
+            actions = {
+                IconButton(onClick = { confirmDelete = true }) {
+                    Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete from history")
+                }
+            }
+        )
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(bottom = 24.dp)
         ) {
-            // Top Row: Date + Status Pill
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = formattedDate,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = badgeColor.copy(alpha = 0.12f),
-                    border = BorderStroke(1.dp, badgeColor.copy(alpha = 0.4f))
+            item {
+                Column(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    Surface(
+                        shape = RoundedCornerShape(topStart = 18.dp, topEnd = 4.dp, bottomEnd = 18.dp, bottomStart = 18.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(
-                            imageVector = badgeIcon,
-                            contentDescription = null,
-                            tint = badgeColor,
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Text(
-                            text = badgeText,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = badgeColor,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Text(broadcast.messageText, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(14.dp))
                     }
-                }
-            }
-
-            // Candidate Sender ID Badge Row
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = accentColor.copy(alpha = 0.12f),
-                    border = BorderStroke(1.dp, accentColor.copy(alpha = 0.35f))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Badge,
-                            contentDescription = null,
-                            tint = accentColor,
-                            modifier = Modifier.size(14.dp)
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "Sender ID: ${broadcast.senderIdUsed}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = accentColor,
-                            fontWeight = FontWeight.Black
+                            "${peopleCount(broadcast.totalRecipients)} · ${sendModeLabel(broadcast.sendMode)}" +
+                                if (broadcast.senderIdUsed.isNotBlank()) " · ${broadcast.senderIdUsed}" else "",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
                         )
+                        StatusPill(broadcastStatusLabel(broadcast.overallStatus))
                     }
-                }
-                if (broadcast.candidateLabel.isNotBlank()) {
-                    Text(
-                        text = broadcast.candidateLabel,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
+                    Text(broadcast.statusDetail, style = MaterialTheme.typography.bodyMedium)
 
-            // Message Text Box
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = primaryColor.copy(alpha = 0.06f),
-                border = BorderStroke(1.dp, primaryColor.copy(alpha = 0.18f)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = broadcast.messageText,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(12.dp)
-                )
-            }
+                    if (counts != null && broadcast.sendMode != SendMode.SMS_APP) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CountTile("Delivered", counts.delivered, StatusTone.SUCCESS, Modifier.weight(1f))
+                            CountTile("Sent", counts.sent, StatusTone.SUCCESS, Modifier.weight(1f))
+                            CountTile("Not sent", counts.failed, StatusTone.ERROR, Modifier.weight(1f))
+                            CountTile("Sending", counts.pending, StatusTone.PROGRESS, Modifier.weight(1f))
+                        }
+                        if (broadcast.sendMode == SendMode.DIRECT_SIM && counts.sent > 0 && counts.delivered == 0) {
+                            Text(
+                                "\"Sent\" means it left your phone. Some networks don't send delivery reports.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
 
-            // Recipients Count & Detailed Status Explanation
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Delegates / Recipients: ${broadcast.totalRecipients}",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = primaryColor,
-                    fontWeight = FontWeight.ExtraBold
-                )
-                Text(
-                    text = when (broadcast.sendMode) {
-                        "SMS_APP" -> "Via Phone SMS App"
-                        "DIRECT_SIM" -> "Via Direct SIM"
-                        else -> "Via SMSOnlineGH"
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            Text(
-                text = broadcast.statusDetail,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            HorizontalDivider(color = Color.LightGray.copy(alpha = 0.4f))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(
-                    onClick = { expanded = !expanded }
-                ) {
-                    Icon(
-                        imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (expanded) "Hide Recipients" else "Recipient Status")
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(
+                    if (failedCount > 0 && broadcast.sendMode != SendMode.SMS_APP) {
+                        Button(
+                            onClick = {
+                                if (broadcast.sendMode == SendMode.DIRECT_SIM && !hasSendSmsPermission()) {
+                                    permissionLauncher.launch(Manifest.permission.SEND_SMS)
+                                } else {
+                                    onRetryFailed()
+                                }
+                            },
+                            enabled = !isSending,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("retry_failed_button")
+                        ) {
+                            Icon(Icons.Rounded.Replay, contentDescription = null)
+                            Spacer(Modifier.size(8.dp))
+                            Text("Retry the $failedCount not sent")
+                        }
+                    }
+                    OutlinedButton(
                         onClick = onReuseMessage,
-                        modifier = Modifier.testTag("reuse_message_button_${broadcast.id}")
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("reuse_message_button_${broadcast.id}")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Replay,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Send Again")
+                        Icon(Icons.Rounded.Edit, contentDescription = null)
+                        Spacer(Modifier.size(8.dp))
+                        Text("Edit and send again")
                     }
 
-                    IconButton(onClick = onDelete) {
-                        Icon(
-                            imageVector = Icons.Default.Delete,
-                            contentDescription = "Delete history entry",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-
-            if (expanded) {
-                val deliveries by observeDeliveries(broadcast.id)
-                    .collectAsStateWithLifecycle(initialValue = emptyList())
-
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        deliveries.forEach { d ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "${d.contactName} (${d.phoneNumber})",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    if (!d.errorDetail.isNullOrBlank()) {
-                                        Text(
-                                            text = d.errorDetail,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = if (d.status == "FAILED") accentColor else MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                                val statusLabel = when (d.status) {
-                                    "DELIVERED" -> "Delivered"
-                                    "SUBMITTED" -> "Accepted (HSHK_OK)"
-                                    "SENT" -> "Sent to Carrier"
-                                    "OPENED_IN_APP" -> "In SMS App"
-                                    "FAILED" -> "Failed"
-                                    else -> "Sending..."
-                                }
-                                Text(
-                                    text = statusLabel,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = when (d.status) {
-                                        "DELIVERED", "SUBMITTED", "SENT" -> primaryColor
-                                        "FAILED" -> accentColor
-                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
-                                    }
-                                )
+                    if (deliveries.size > 1 && broadcast.sendMode != SendMode.SMS_APP) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            RecipientFilter.entries.forEach { f ->
+                                FilterChip(selected = filter == f, onClick = { filter = f }, label = { Text(f.label) })
                             }
                         }
                     }
                 }
             }
+            items(visible, key = { it.id }) { delivery ->
+                DeliveryRow(delivery)
+            }
+            if (visible.isEmpty() && deliveries.isNotEmpty()) {
+                item {
+                    Text(
+                        "No one in this list.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(20.dp)
+                    )
+                }
+            }
         }
     }
+
+    if (confirmDelete) {
+        ConfirmDialog(
+            title = "Delete this message?",
+            message = "It will be removed from your history. Messages already sent cannot be taken back.",
+            confirmLabel = "Delete",
+            destructive = true,
+            onConfirm = onDelete,
+            onDismiss = { confirmDelete = false }
+        )
+    }
+}
+
+@Composable
+private fun CountTile(label: String, value: Int, tone: StatusTone, modifier: Modifier = Modifier) {
+    val color = toneColor(tone)
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = if (value > 0) color.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = modifier
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                value.toString(),
+                style = MaterialTheme.typography.titleLarge,
+                color = if (value > 0) color else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun DeliveryRow(delivery: RecipientDeliveryEntity) {
+    val number = PhoneNumbers.format(delivery.phoneNumber)
+    val label = deliveryStatusLabel(delivery.status)
+    ListItem(
+        headlineContent = { Text(delivery.contactName.ifBlank { number }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        supportingContent = {
+            Column {
+                if (delivery.contactName.isNotBlank()) Text(number)
+                if (delivery.status == DeliveryStatus.FAILED && !delivery.errorDetail.isNullOrBlank()) {
+                    Text(delivery.errorDetail, color = toneColor(StatusTone.ERROR), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        trailingContent = { StatusPill(label) },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+    )
 }

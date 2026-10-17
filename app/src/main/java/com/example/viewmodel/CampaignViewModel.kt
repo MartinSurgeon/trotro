@@ -6,23 +6,33 @@ import android.provider.ContactsContract
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.example.data.CampaignDatabase
+import com.example.AppGraph
+import com.example.data.AddContactResult
+import com.example.data.BroadcastCounts
 import com.example.data.CampaignRepository
 import com.example.data.ContactEntity
+import com.example.data.DeliveryStatus
 import com.example.data.MessageBroadcastEntity
 import com.example.data.OrganisationProfileEntity
 import com.example.data.RecipientDeliveryEntity
+import com.example.data.SendMode
 import com.example.data.SenderIdEntity
+import com.example.data.SettingsStore
 import com.example.sms.SmsSenderService
 import com.example.util.CsvContactParser
+import com.example.util.PhoneNumbers
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
@@ -31,20 +41,48 @@ import java.io.InputStreamReader
 enum class AppScreen {
     HOME,
     CONTACTS,
-    SEND_SMS,
-    HISTORY
+    HISTORY,
+    SETTINGS,
+    COMPOSE
 }
 
+data class GroupInfo(val name: String, val count: Int, val selectedCount: Int) {
+    val allSelected: Boolean get() = count > 0 && selectedCount == count
+}
+
+data class ImportPreview(
+    val contacts: List<ContactEntity>,
+    val alreadySaved: Int,
+    val skippedRows: Int
+) {
+    val newCount: Int get() = contacts.size - alreadySaved
+}
+
+/** One-off messages for the snackbar. [action] runs if the user taps [actionLabel]. */
+data class UiEvent(
+    val message: String,
+    val actionLabel: String? = null,
+    val action: (() -> Unit)? = null
+)
+
 data class CampaignUiState(
+    val isLoaded: Boolean = false,
     val currentScreen: AppScreen = AppScreen.HOME,
+    val showWelcome: Boolean = false,
     val profile: OrganisationProfileEntity = OrganisationProfileEntity(),
     val senderIds: List<SenderIdEntity> = emptyList(),
     val contacts: List<ContactEntity> = emptyList(),
     val broadcasts: List<MessageBroadcastEntity> = emptyList(),
-    val messageText: String = "Please vote for Joyce Afi Fianu as your Women Organizer. Together, we can work for change. Thank you.",
-    val sendMode: String = "SMSONLINEGH", // "SMSONLINEGH", "DIRECT_SIM", "SMS_APP"
-    val snackbarMessage: String? = null,
-    val isSending: Boolean = false
+    val broadcastCounts: Map<Long, BroadcastCounts> = emptyMap(),
+    val messageText: String = "",
+    val messageRevision: Int = 0,
+    val sendMode: String = SendMode.DIRECT_SIM,
+    val isSending: Boolean = false,
+    val gatewayConfigured: Boolean = false,
+    val usingBuildApiKey: Boolean = false,
+    val savedApiKeyHint: String = "",
+    val pendingImport: ImportPreview? = null,
+    val openBroadcastId: Long? = null
 ) {
     val selectedContacts: List<ContactEntity>
         get() = contacts.filter { it.isSelected }
@@ -58,66 +96,91 @@ data class CampaignUiState(
         } ?: senderIds.firstOrNull { it.isDefault } ?: senderIds.firstOrNull()
 
     val activeSenderName: String
-        get() = activeSender?.senderName ?: profile.activeSenderId.ifBlank { "JOYCE AFI" }
+        get() = activeSender?.senderName.orEmpty()
 
-    val activeCandidateLabel: String
-        get() = activeSender?.candidateOrOrgLabel ?: profile.organisationName
+    val displayName: String
+        get() = profile.organisationName.ifBlank { "My group" }
 
-    val delegateGroups: List<String>
-        get() = listOf("All") + contacts
-            .map { it.groupTag.trim() }
-            .filter { it.isNotEmpty() }
-            .distinctBy { it.lowercase() }
-            .sorted()
+    val groups: List<GroupInfo>
+        get() = contacts
+            .filter { it.groupTag.isNotBlank() }
+            .groupBy { it.groupTag.trim().lowercase() }
+            .map { (_, members) ->
+                GroupInfo(
+                    name = members.first().groupTag.trim(),
+                    count = members.size,
+                    selectedCount = members.count { it.isSelected }
+                )
+            }
+            .sortedBy { it.name.lowercase() }
 }
+
+private data class LocalState(
+    val initialized: Boolean = false,
+    val screen: AppScreen = AppScreen.HOME,
+    val composeReturnScreen: AppScreen = AppScreen.HOME,
+    val messageText: String = "",
+    val messageRevision: Int = 0,
+    val sendMode: String = SendMode.DIRECT_SIM,
+    val isSending: Boolean = false,
+    val welcomeDone: Boolean = true,
+    val gatewayConfigured: Boolean = false,
+    val usingBuildApiKey: Boolean = false,
+    val savedApiKeyHint: String = "",
+    val pendingImport: ImportPreview? = null,
+    val openBroadcastId: Long? = null
+)
+
+private data class DataState(
+    val profile: OrganisationProfileEntity?,
+    val senderIds: List<SenderIdEntity>,
+    val contacts: List<ContactEntity>,
+    val broadcasts: List<MessageBroadcastEntity>,
+    val counts: List<BroadcastCounts>
+)
 
 class CampaignViewModel(
     private val repository: CampaignRepository,
-    private val smsSenderService: SmsSenderService
+    private val smsSenderService: SmsSenderService,
+    private val settings: SettingsStore
 ) : ViewModel() {
 
-    private val _currentScreen = MutableStateFlow(AppScreen.HOME)
-    private val _messageText = MutableStateFlow(
-        "Please vote for Joyce Afi Fianu as your Women Organizer. Together, we can work for change. Thank you."
-    )
-    private val _sendMode = MutableStateFlow("SMSONLINEGH")
-    private val _snackbarMessage = MutableStateFlow<String?>(null)
-    private val _isSending = MutableStateFlow(false)
-    private var messageInitializedFromProfile = false
+    private val local = MutableStateFlow(LocalState())
+    private val eventChannel = Channel<UiEvent>(Channel.BUFFERED)
+    val events: Flow<UiEvent> = eventChannel.receiveAsFlow()
 
-    val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
+    private var draftSaveJob: Job? = null
 
-    val uiState: StateFlow<CampaignUiState> = combine(
-        _currentScreen,
+    private val data = combine(
         repository.organisationProfile,
         repository.allSenderIds,
         repository.allContacts,
-        combine(
-            repository.allBroadcasts,
-            _messageText,
-            _sendMode,
-            _snackbarMessage,
-            _isSending
-        ) { broadcasts, msg, mode, snack, sending ->
-            Quint(broadcasts, msg, mode, snack, sending)
-        }
-    ) { screen, profileEntity, senderIds, contacts, quint ->
-        val resolvedProfile = profileEntity ?: OrganisationProfileEntity()
-        if (!messageInitializedFromProfile && profileEntity != null && profileEntity.draftMessage.isNotBlank()) {
-            messageInitializedFromProfile = true
-            _messageText.value = profileEntity.draftMessage
-            _sendMode.value = profileEntity.preferredSendMode
-        }
+        repository.allBroadcasts,
+        repository.broadcastCounts
+    ) { profile, senders, contacts, broadcasts, counts ->
+        DataState(profile, senders, contacts, broadcasts, counts)
+    }
+
+    val uiState: StateFlow<CampaignUiState> = combine(data, local) { d, l ->
+        val profile = d.profile ?: OrganisationProfileEntity()
         CampaignUiState(
-            currentScreen = screen,
-            profile = resolvedProfile,
-            senderIds = senderIds,
-            contacts = contacts,
-            broadcasts = quint.first,
-            messageText = quint.second,
-            sendMode = quint.third,
-            snackbarMessage = quint.fourth,
-            isSending = quint.fifth
+            isLoaded = l.initialized && d.profile != null,
+            currentScreen = l.screen,
+            showWelcome = !l.welcomeDone && profile.organisationName.isBlank(),
+            profile = profile,
+            senderIds = d.senderIds,
+            contacts = d.contacts,
+            broadcasts = d.broadcasts,
+            broadcastCounts = d.counts.associateBy { it.broadcastId },
+            messageText = l.messageText,
+            messageRevision = l.messageRevision,
+            sendMode = l.sendMode,
+            isSending = l.isSending,
+            gatewayConfigured = l.gatewayConfigured,
+            usingBuildApiKey = l.usingBuildApiKey,
+            savedApiKeyHint = l.savedApiKeyHint,
+            pendingImport = l.pendingImport,
+            openBroadcastId = l.openBroadcastId
         )
     }.stateIn(
         scope = viewModelScope,
@@ -126,352 +189,379 @@ class CampaignViewModel(
     )
 
     init {
+        refreshGatewayState()
         viewModelScope.launch {
-            val profile = repository.ensureDefaultProfileAndSenderIds()
-            if (!messageInitializedFromProfile) {
-                messageInitializedFromProfile = true
-                _messageText.value = profile.draftMessage
-                _sendMode.value = profile.preferredSendMode
+            val profile = repository.ensureDefaultProfile()
+            // Existing installs already have a name, so they skip the welcome screen.
+            if (profile.organisationName.isNotBlank()) settings.hasCompletedWelcome = true
+            local.update {
+                it.copy(
+                    initialized = true,
+                    messageText = profile.draftMessage,
+                    sendMode = profile.preferredSendMode,
+                    welcomeDone = settings.hasCompletedWelcome
+                )
             }
         }
     }
 
+    private fun showMessage(msg: String, actionLabel: String? = null, action: (() -> Unit)? = null) {
+        eventChannel.trySend(UiEvent(msg, actionLabel, action))
+    }
+
+    // --- Navigation ---
+
     fun navigateTo(screen: AppScreen) {
-        _currentScreen.value = screen
+        if (screen == AppScreen.COMPOSE) {
+            openCompose()
+            return
+        }
+        local.update { it.copy(screen = screen, openBroadcastId = null) }
     }
 
-    fun clearSnackbar() {
-        _snackbarMessage.value = null
+    fun openCompose() {
+        local.update {
+            if (it.screen == AppScreen.COMPOSE) it
+            else it.copy(screen = AppScreen.COMPOSE, composeReturnScreen = it.screen)
+        }
     }
 
-    fun showMessage(msg: String) {
-        _snackbarMessage.value = msg
+    /** Handles the system back button. Returns false when the app should close. */
+    fun navigateBack(): Boolean {
+        val state = local.value
+        when {
+            state.screen == AppScreen.COMPOSE -> local.update { it.copy(screen = it.composeReturnScreen) }
+            state.openBroadcastId != null -> local.update { it.copy(openBroadcastId = null) }
+            state.screen != AppScreen.HOME -> local.update { it.copy(screen = AppScreen.HOME) }
+            else -> return false
+        }
+        return true
     }
+
+    fun openBroadcast(broadcastId: Long?) {
+        local.update { it.copy(openBroadcastId = broadcastId) }
+    }
+
+    // --- Welcome & profile ---
+
+    fun completeWelcome(name: String) {
+        settings.hasCompletedWelcome = true
+        viewModelScope.launch {
+            repository.updateProfile { it.copy(organisationName = name.trim()) }
+            local.update { it.copy(welcomeDone = true) }
+        }
+    }
+
+    fun saveProfile(name: String, subtitle: String) {
+        viewModelScope.launch {
+            repository.updateProfile {
+                it.copy(organisationName = name.trim(), roleOrSubtitle = subtitle.trim())
+            }
+            showMessage("Profile saved")
+        }
+    }
+
+    fun setColours(primaryHex: String, accentHex: String) {
+        viewModelScope.launch {
+            repository.updateProfile { it.copy(primaryColorHex = primaryHex, accentColorHex = accentHex) }
+        }
+    }
+
+    fun updateProfilePhoto(uri: Uri) {
+        viewModelScope.launch {
+            if (!repository.replaceProfilePhoto(uri)) showMessage("Could not open that picture. Try another one.")
+        }
+    }
+
+    fun removeProfilePhoto() {
+        viewModelScope.launch { repository.removeProfilePhoto() }
+    }
+
+    // --- Message draft ---
 
     fun updateMessageText(newText: String) {
-        _messageText.value = newText
-        viewModelScope.launch {
-            val current = uiState.value.profile
-            repository.saveOrganisationProfile(current.copy(draftMessage = newText))
+        local.update { it.copy(messageText = newText) }
+        draftSaveJob?.cancel()
+        draftSaveJob = viewModelScope.launch {
+            delay(400)
+            repository.updateProfile { it.copy(draftMessage = newText) }
+        }
+    }
+
+    /**
+     * Replaces the draft from outside the text field (template, undo, "send again"). Bumping
+     * [CampaignUiState.messageRevision] tells the field to take the new text; ordinary typing
+     * doesn't, so a late state update can never overwrite what the user just typed.
+     */
+    private fun replaceMessageText(newText: String) {
+        updateMessageText(newText)
+        local.update { it.copy(messageRevision = it.messageRevision + 1) }
+    }
+
+    fun applyTemplate(templateText: String) {
+        val previous = local.value.messageText
+        replaceMessageText(templateText)
+        if (previous.isNotBlank() && previous != templateText) {
+            showMessage("Template added. Fill in the [blanks].", "Undo") { replaceMessageText(previous) }
         }
     }
 
     fun updateSendMode(newMode: String) {
-        _sendMode.value = newMode
+        local.update { it.copy(sendMode = newMode) }
         viewModelScope.launch {
-            val current = uiState.value.profile
-            repository.saveOrganisationProfile(current.copy(preferredSendMode = newMode))
+            repository.updateProfile { it.copy(preferredSendMode = newMode) }
         }
     }
 
-    fun addSenderId(
-        senderName: String,
-        candidateOrOrgLabel: String,
-        defaultDelegateGroup: String
-    ) {
-        val cleanSender = senderName.trim().take(11)
-        if (cleanSender.isEmpty()) {
-            showMessage("Please enter a Sender ID (up to 11 characters)")
-            return
-        }
-        viewModelScope.launch {
-            repository.addSenderId(
-                senderName = cleanSender,
-                candidateOrOrgLabel = candidateOrOrgLabel.trim().ifEmpty { cleanSender },
-                defaultDelegateGroup = defaultDelegateGroup.trim().ifEmpty { "All" },
-                makeActive = true
+    // --- SMS Online GH setup ---
+
+    private fun refreshGatewayState() {
+        val userKey = settings.smsOnlineGhApiKey
+        local.update {
+            it.copy(
+                gatewayConfigured = smsSenderService.isSmsOnlineGhApiKeyConfigured(),
+                usingBuildApiKey = settings.isUsingBuildKey(),
+                savedApiKeyHint = if (userKey.length > 4) "•••• ${userKey.takeLast(4)}" else ""
             )
-            showMessage("Added & selected Sender ID '$cleanSender'")
         }
     }
 
-    fun selectActiveSenderId(senderIdEntity: SenderIdEntity, filterDelegates: Boolean = true) {
-        viewModelScope.launch {
-            repository.selectActiveSenderId(senderIdEntity, filterGroupIfSpecific = filterDelegates)
-            val groupNote = if (filterDelegates &&
-                senderIdEntity.defaultDelegateGroup.isNotBlank() &&
-                !senderIdEntity.defaultDelegateGroup.equals("All", ignoreCase = true)
-            ) {
-                " (${senderIdEntity.defaultDelegateGroup})"
-            } else {
-                ""
-            }
-            showMessage("Active Sender ID: ${senderIdEntity.senderName}$groupNote")
+    fun saveApiKey(key: String) {
+        settings.smsOnlineGhApiKey = key
+        refreshGatewayState()
+        showMessage(if (key.isBlank()) "API key removed" else "API key saved")
+    }
+
+    fun addSenderId(senderName: String, note: String): Boolean {
+        val clean = senderName.trim().replace(Regex("\\s+"), " ")
+        if (!isValidSenderName(clean)) {
+            showMessage("Sender names are 1 to 11 letters or numbers.")
+            return false
         }
+        if (uiState.value.senderIds.any { it.senderName.equals(clean, ignoreCase = true) }) {
+            showMessage("\"$clean\" is already in your list")
+            return false
+        }
+        viewModelScope.launch {
+            repository.addSenderId(clean, note)
+            showMessage("Sender name \"$clean\" added")
+        }
+        return true
+    }
+
+    fun selectActiveSenderId(senderIdEntity: SenderIdEntity) {
+        viewModelScope.launch { repository.selectActiveSenderId(senderIdEntity) }
     }
 
     fun deleteSenderId(senderIdEntity: SenderIdEntity) {
-        if (uiState.value.senderIds.size <= 1) {
-            showMessage("Keep at least one Sender ID")
-            return
-        }
         viewModelScope.launch {
             repository.deleteSenderId(senderIdEntity)
-            showMessage("Removed Sender ID '${senderIdEntity.senderName}'")
+            showMessage("Removed \"${senderIdEntity.senderName}\"")
         }
     }
 
-    fun selectDelegatesByGroup(groupTag: String) {
+    // --- Contacts ---
+
+    fun addManualContact(name: String, phone: String, groupTag: String) {
         viewModelScope.launch {
-            repository.selectContactsByGroup(groupTag)
-            if (groupTag.equals("All", ignoreCase = true)) {
-                showMessage("Selected all delegates")
-            } else {
-                showMessage("Selected delegates in '$groupTag'")
+            val label = name.trim().ifBlank { PhoneNumbers.format(phone) }
+            when (repository.addContact(name, phone, groupTag)) {
+                AddContactResult.ADDED -> showMessage("$label added")
+                AddContactResult.DUPLICATE -> showMessage("${PhoneNumbers.format(phone)} is already saved")
+                AddContactResult.INVALID_NUMBER -> showMessage("That phone number doesn't look right")
             }
         }
     }
 
-    fun saveOrganisationCustomization(
-        organisationName: String,
-        roleOrSubtitle: String,
-        slogan: String,
-        primaryColorHex: String,
-        accentColorHex: String,
-        customPhotoPath: String?
-    ) {
+    /** Returns an error message, or null when the contact was saved. */
+    fun updateContact(original: ContactEntity, name: String, phone: String, groupTag: String): String? {
+        val normalized = PhoneNumbers.normalize(phone) ?: return "Enter a valid phone number"
+        val key = PhoneNumbers.dedupeKey(normalized)
+        val clash = uiState.value.contacts.any { it.id != original.id && PhoneNumbers.dedupeKey(it.phoneNumber) == key }
+        if (clash) return "Another contact already has this number"
         viewModelScope.launch {
-            val current = uiState.value.profile
-            val updated = current.copy(
-                organisationName = organisationName.trim().ifEmpty { "MY ORGANISATION" },
-                roleOrSubtitle = roleOrSubtitle.trim(),
-                slogan = slogan.trim(),
-                primaryColorHex = primaryColorHex,
-                accentColorHex = accentColorHex,
-                customPhotoPath = customPhotoPath
+            repository.updateContact(
+                original.copy(name = name.trim(), phoneNumber = normalized, groupTag = groupTag.trim())
             )
-            repository.saveOrganisationProfile(updated)
-            showMessage("Organisation profile & colours updated!")
+            showMessage("Contact saved")
         }
+        return null
     }
 
-    fun updateOrganisationPhotoFromUri(uri: Uri) {
+    fun deleteContact(contact: ContactEntity) {
         viewModelScope.launch {
-            val savedPath = repository.copyPhotoToInternalStorage(uri)
-            if (savedPath != null) {
-                val current = uiState.value.profile
-                repository.saveOrganisationProfile(current.copy(customPhotoPath = savedPath))
-                showMessage("Campaign photo / logo updated!")
-            } else {
-                showMessage("Could not load selected image")
+            repository.deleteContact(contact.id)
+            val label = contact.name.ifBlank { PhoneNumbers.format(contact.phoneNumber) }
+            showMessage("$label deleted", "Undo") {
+                viewModelScope.launch { repository.restoreContact(contact) }
             }
-        }
-    }
-
-    fun resetOrganisationPhotoToDefault() {
-        viewModelScope.launch {
-            val current = uiState.value.profile
-            repository.saveOrganisationProfile(current.copy(customPhotoPath = null))
-            showMessage("Restored default campaign flyer illustration")
-        }
-    }
-
-    fun addManualContact(name: String, phone: String, groupTag: String = "All Delegates") {
-        val sanitized = CsvContactParser.sanitizePhone(phone)
-        if (!CsvContactParser.isValidPhone(sanitized)) {
-            showMessage("Please enter a valid phone number (at least 6 digits)")
-            return
-        }
-        val finalName = name.trim().ifEmpty { "Delegate $sanitized" }
-        viewModelScope.launch {
-            repository.addContact(finalName, sanitized, groupTag.ifBlank { "All Delegates" })
-            showMessage("Added $finalName ($sanitized)")
-        }
-    }
-
-    fun importContactFromSystemUri(context: Context, contactUri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                var contactId: String? = null
-                var displayName = ""
-                context.contentResolver.query(contactUri, null, null, null, null)?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val idIndex = cursor.getColumnIndex(ContactsContract.Contacts._ID)
-                        val nameIndex = cursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME)
-                        if (idIndex >= 0) contactId = cursor.getString(idIndex)
-                        if (nameIndex >= 0) displayName = cursor.getString(nameIndex) ?: ""
-                    }
-                }
-                var phone: String? = null
-                if (contactId != null) {
-                    context.contentResolver.query(
-                        ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                        null,
-                        "${ContactsContract.CommonDataKinds.Phone.CONTACT_ID} = ?",
-                        arrayOf(contactId),
-                        null
-                    )?.use { pCursor ->
-                        if (pCursor.moveToFirst()) {
-                            val numIndex = pCursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
-                            if (numIndex >= 0) phone = pCursor.getString(numIndex)
-                        }
-                    }
-                }
-                val cleanPhone = phone?.let { CsvContactParser.sanitizePhone(it) } ?: ""
-                if (CsvContactParser.isValidPhone(cleanPhone)) {
-                    repository.addContact(
-                        name = displayName.ifBlank { "Delegate $cleanPhone" },
-                        phoneNumber = cleanPhone,
-                        groupTag = "Phonebook"
-                    )
-                    showMessage("Added ${displayName.ifBlank { cleanPhone }}")
-                } else {
-                    showMessage("Selected contact does not have a valid phone number")
-                }
-            } catch (e: Exception) {
-                showMessage("Could not read phonebook contact: make sure a phone number is saved")
-            }
-        }
-    }
-
-    fun importContactsFromCsvUri(context: Context, uri: Uri) {
-        viewModelScope.launch {
-            val rawText = withContext(Dispatchers.IO) {
-                try {
-                    context.contentResolver.openInputStream(uri)?.use { stream ->
-                        BufferedReader(InputStreamReader(stream)).readText()
-                    }
-                } catch (e: Exception) {
-                    null
-                }
-            }
-            if (rawText.isNullOrBlank()) {
-                showMessage("Could not read the selected CSV file")
-                return@launch
-            }
-            importContactsFromCsvString(rawText)
-        }
-    }
-
-    fun importContactsFromCsvString(rawCsv: String) {
-        viewModelScope.launch {
-            val parseResult = CsvContactParser.parseCsv(rawCsv)
-            if (parseResult.contacts.isEmpty()) {
-                showMessage("No valid phone numbers found in CSV")
-                return@launch
-            }
-            val insertedCount = repository.importContacts(parseResult.contacts)
-            val duplicateCount = parseResult.contacts.size - insertedCount
-            val msg = buildString {
-                append("Imported $insertedCount delegate contact(s)")
-                if (duplicateCount > 0) append(" ($duplicateCount duplicate(s) skipped)")
-            }
-            showMessage(msg)
-        }
-    }
-
-    fun loadSampleCampaignCsv() {
-        val sampleCsv = """
-            Name,Phone Number,Delegate Group
-            Abena Mensah,+233244102030,Women's Wing
-            Akosua Ofori,+233502334455,Women's Wing
-            Kofi Owusu,+233208112233,Youth Delegates
-            Yaw Asante,+233249876543,Youth Delegates
-            Ama Serwaa,+233541998877,Branch Executives
-            Kwame Boateng,+233277445566,Branch Executives
-        """.trimIndent()
-        importContactsFromCsvString(sampleCsv)
-    }
-
-    fun toggleContactSelection(contactId: Long, selected: Boolean) {
-        viewModelScope.launch {
-            repository.toggleContactSelection(contactId, selected)
-        }
-    }
-
-    fun setAllContactsSelected(selected: Boolean) {
-        viewModelScope.launch {
-            repository.setAllContactsSelected(selected)
-        }
-    }
-
-    fun deleteContact(contactId: Long) {
-        viewModelScope.launch {
-            repository.deleteContact(contactId)
-            showMessage("Contact removed")
         }
     }
 
     fun clearAllContacts() {
         viewModelScope.launch {
             repository.deleteAllContacts()
-            showMessage("All contacts cleared")
+            showMessage("All contacts deleted")
         }
     }
 
-    fun isSmsOnlineGhConfigured(): Boolean = smsSenderService.isSmsOnlineGhApiKeyConfigured()
+    fun toggleContactSelection(contactId: Long, selected: Boolean) {
+        viewModelScope.launch { repository.toggleContactSelection(contactId, selected) }
+    }
+
+    fun setAllContactsSelected(selected: Boolean) {
+        viewModelScope.launch { repository.setAllContactsSelected(selected) }
+    }
+
+    /** Selects every member of the group, or deselects them all if they were all selected. */
+    fun toggleGroupSelection(group: GroupInfo) {
+        viewModelScope.launch { repository.setGroupSelected(group.name, !group.allSelected) }
+    }
+
+    /** Reads a phone number picked with ACTION_PICK on Phone.CONTENT_TYPE (no permission needed). */
+    fun importContactFromPhonebook(context: Context, phoneUri: Uri) {
+        viewModelScope.launch {
+            val picked = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.query(
+                        phoneUri,
+                        arrayOf(
+                            ContactsContract.CommonDataKinds.Phone.NUMBER,
+                            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+                        ),
+                        null,
+                        null,
+                        null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0).orEmpty() to cursor.getString(1).orEmpty() else null
+                    }
+                }.getOrNull()
+            }
+            if (picked == null) {
+                showMessage("Could not read that contact")
+                return@launch
+            }
+            addManualContact(picked.second, picked.first, "")
+        }
+    }
+
+    fun previewCsvFromUri(context: Context, uri: Uri) {
+        viewModelScope.launch {
+            val rawText = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { stream ->
+                        BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).readText()
+                    }
+                }.getOrNull()
+            }
+            if (rawText.isNullOrBlank()) {
+                showMessage("Could not read that file. Save it as CSV and try again.")
+                return@launch
+            }
+            previewCsvText(rawText)
+        }
+    }
+
+    fun previewCsvText(rawCsv: String) {
+        viewModelScope.launch {
+            val parsed = withContext(Dispatchers.Default) { CsvContactParser.parseCsv(rawCsv) }
+            if (parsed.contacts.isEmpty()) {
+                showMessage("No phone numbers found. Put one contact per line: Name, Number")
+                return@launch
+            }
+            val existing = repository.countExisting(parsed.contacts)
+            local.update { it.copy(pendingImport = ImportPreview(parsed.contacts, existing, parsed.skippedRows)) }
+        }
+    }
+
+    fun confirmImport(groupName: String) {
+        val preview = local.value.pendingImport ?: return
+        local.update { it.copy(pendingImport = null) }
+        viewModelScope.launch {
+            val group = groupName.trim()
+            val toInsert = if (group.isEmpty()) preview.contacts else preview.contacts.map {
+                if (it.groupTag.isBlank()) it.copy(groupTag = group) else it
+            }
+            val inserted = repository.importContacts(toInsert)
+            showMessage(if (inserted == 1) "1 contact added" else "$inserted contacts added")
+        }
+    }
+
+    fun cancelImport() {
+        local.update { it.copy(pendingImport = null) }
+    }
+
+    // --- Sending ---
 
     fun hasSendSmsPermission(): Boolean = smsSenderService.hasSendSmsPermission()
 
     fun isSimReady(): Boolean = smsSenderService.isSimReady()
 
-    fun executeConfirmedSend(
-        activityContext: Context,
-        onCompleteNavigateToHistory: () -> Unit
-    ) {
+    fun executeConfirmedSend(activityContext: Context) {
         val state = uiState.value
-        val recipients = state.selectedContacts
         val message = state.messageText.trim()
-        val senderId = state.activeSenderName
-        val candidateLabel = state.activeCandidateLabel
+        val recipients = state.selectedContacts
+        if (message.isEmpty() || recipients.isEmpty() || state.isSending) return
+        dispatch(
+            activityContext = activityContext,
+            mode = state.sendMode,
+            senderId = state.activeSenderName,
+            label = state.displayName,
+            message = message,
+            recipients = recipients
+        )
+    }
 
-        if (message.isEmpty()) {
-            showMessage("Please write a message before sending")
-            return
-        }
-        if (recipients.isEmpty()) {
-            showMessage("Please select at least one recipient")
-            return
-        }
-
+    /** Sends the message again to only the people it failed for. */
+    fun retryFailed(broadcastId: Long, activityContext: Context) {
+        if (local.value.isSending) return
         viewModelScope.launch {
-            _isSending.value = true
+            val broadcast = repository.getBroadcast(broadcastId) ?: return@launch
+            val failed = repository.getDeliveriesSnapshot(broadcastId)
+                .filter { it.status == DeliveryStatus.FAILED }
+                .map { ContactEntity(name = it.contactName, phoneNumber = it.phoneNumber) }
+            if (failed.isEmpty()) return@launch
+            dispatch(
+                activityContext = activityContext,
+                mode = broadcast.sendMode,
+                senderId = broadcast.senderIdUsed.ifBlank { uiState.value.activeSenderName },
+                label = broadcast.candidateLabel,
+                message = broadcast.messageText,
+                recipients = failed
+            )
+        }
+    }
+
+    private fun dispatch(
+        activityContext: Context,
+        mode: String,
+        senderId: String,
+        label: String,
+        message: String,
+        recipients: List<ContactEntity>
+    ) {
+        local.update { it.copy(isSending = true) }
+        // Jump to the message's progress page as soon as it exists, rather than making the
+        // user wait on the compose screen while hundreds of messages go out.
+        val onCreated: (Long) -> Unit = { id ->
+            local.update { it.copy(screen = AppScreen.HISTORY, openBroadcastId = id) }
+        }
+        viewModelScope.launch {
             try {
-                when (state.sendMode) {
-                    "SMS_APP" -> {
+                when (mode) {
+                    SendMode.SMS_APP -> {
                         val (_, launched) = smsSenderService.sendViaSystemSmsApp(
-                            activityContext = activityContext,
-                            senderId = senderId,
-                            candidateLabel = candidateLabel,
-                            messageTemplate = message,
-                            recipients = recipients
+                            activityContext, label, message, recipients, onCreated
                         )
-                        if (launched) {
-                            showMessage("Opened device SMS app with ${recipients.size} recipient(s)")
-                        } else {
-                            showMessage("No default SMS app available on this device")
-                        }
+                        if (!launched) showMessage("No Messages app was found on this phone")
                     }
-                    "DIRECT_SIM" -> {
-                        smsSenderService.sendViaDirectSim(
-                            senderId = senderId,
-                            candidateLabel = candidateLabel,
-                            messageTemplate = message,
-                            recipients = recipients
-                        )
-                        if (smsSenderService.isSimReady()) {
-                            showMessage("Sending SMS to ${recipients.size} recipient(s) via SIM...")
-                        } else {
-                            showMessage("Attempted SIM send — check History for SIM/carrier status")
-                        }
-                    }
-                    else -> {
-                        smsSenderService.sendViaSmsOnlineGh(
-                            senderId = senderId,
-                            candidateLabel = candidateLabel,
-                            messageTemplate = message,
-                            recipients = recipients
-                        )
-                        if (smsSenderService.isSmsOnlineGhApiKeyConfigured()) {
-                            showMessage("Submitted ${recipients.size} SMS via SMSOnlineGH (Sender: $senderId)")
-                        } else {
-                            showMessage("Add SMSONLINEGH_API_KEY in AI Studio Secrets panel to send via SMSOnlineGH")
-                        }
-                    }
+                    SendMode.DIRECT_SIM -> smsSenderService.sendViaDirectSim(label, message, recipients, onCreated)
+                    else -> smsSenderService.sendViaSmsOnlineGh(senderId, label, message, recipients, onCreated)
                 }
-                onCompleteNavigateToHistory()
+            } catch (e: Exception) {
+                showMessage("Something went wrong while sending. Check the message in History.")
             } finally {
-                _isSending.value = false
+                local.update { it.copy(isSending = false) }
             }
         }
     }
@@ -480,28 +570,35 @@ class CampaignViewModel(
         return repository.observeDeliveriesForBroadcast(broadcastId)
     }
 
+    fun reuseMessage(text: String) {
+        replaceMessageText(text)
+        local.update { it.copy(openBroadcastId = null) }
+        openCompose()
+    }
+
     fun deleteBroadcast(broadcastId: Long) {
+        local.update { if (it.openBroadcastId == broadcastId) it.copy(openBroadcastId = null) else it }
         viewModelScope.launch {
             repository.deleteBroadcast(broadcastId)
-            showMessage("Message history item deleted")
+            showMessage("Message deleted from history")
         }
     }
 
-    private data class Quint<A, B, C, D, E>(
-        val first: A,
-        val second: B,
-        val third: C,
-        val fourth: D,
-        val fifth: E
-    )
+    companion object {
+        private val senderNameRegex = Regex("^[A-Za-z0-9 ]{1,11}$")
+
+        fun isValidSenderName(name: String): Boolean =
+            senderNameRegex.matches(name) && name.any { it.isLetterOrDigit() }
+    }
 
     class Factory(private val appContext: Context) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            val db = CampaignDatabase.getInstance(appContext)
-            val repo = CampaignRepository(db.campaignDao(), appContext)
-            val smsService = SmsSenderService(appContext, repo)
-            return CampaignViewModel(repo, smsService) as T
+            return CampaignViewModel(
+                AppGraph.repository(appContext),
+                AppGraph.smsSender(appContext),
+                AppGraph.settings(appContext)
+            ) as T
         }
     }
 }
