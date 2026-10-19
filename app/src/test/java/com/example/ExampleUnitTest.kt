@@ -1,5 +1,12 @@
 package com.example
 
+import com.example.data.BroadcastCounts
+import com.example.data.DeliveryStatus
+import com.example.data.RecipientDeliveryEntity
+import com.example.data.SendMode
+import com.example.ui.components.StatusTone
+import com.example.ui.components.groupFailureReasons
+import com.example.ui.components.outcomeOf
 import com.example.util.CsvContactParser
 import com.example.util.MessageTemplates
 import com.example.util.PhoneNumbers
@@ -116,6 +123,45 @@ class ExampleUnitTest {
             val sample = MessageTemplates.personalize(template.text, "Ama")
             assertFalse("${template.title} forces Unicode", SmsCounter.count(sample).isUnicode)
         }
+    }
+
+    @Test
+    fun outcome_givesOnePlainSentence() {
+        fun counts(sent: Int, delivered: Int, failed: Int, pending: Int) = BroadcastCounts(
+            broadcastId = 1, total = sent + delivered + failed + pending,
+            delivered = delivered, sent = sent, failed = failed, pending = pending, openedInApp = 0
+        )
+        assertEquals("Sent to all 45", outcomeOf(counts(40, 5, 0, 0), 45, SendMode.DIRECT_SIM)!!.headline)
+        assertEquals("42 of 45 sent", outcomeOf(counts(42, 0, 3, 0), 45, SendMode.DIRECT_SIM)!!.headline)
+        assertEquals("None of 3 sent", outcomeOf(counts(0, 0, 3, 0), 3, SendMode.SMSONLINEGH)!!.headline)
+        assertEquals("Sending… 10 of 45 done", outcomeOf(counts(8, 0, 2, 35), 45, SendMode.DIRECT_SIM)!!.headline)
+
+        val partial = outcomeOf(counts(42, 0, 3, 0), 45, SendMode.DIRECT_SIM)!!
+        assertTrue(partial.hasFailures)
+        assertEquals(StatusTone.WARNING, partial.tone)
+        // Failures still sending are not "needs attention" yet.
+        assertFalse(outcomeOf(counts(8, 0, 2, 35), 45, SendMode.DIRECT_SIM)!!.hasFailures)
+        // The Messages app does its own sending, so there is no outcome to show.
+        assertNull(outcomeOf(counts(0, 0, 0, 0), 3, SendMode.SMS_APP))
+    }
+
+    @Test
+    fun failureReasons_groupedMostCommonFirst() {
+        fun d(status: String, reason: String?) =
+            RecipientDeliveryEntity(broadcastId = 1, contactName = "", phoneNumber = "0244102030", status = status, errorDetail = reason)
+        val reasons = groupFailureReasons(
+            listOf(
+                d(DeliveryStatus.FAILED, "No network signal."),
+                d(DeliveryStatus.FAILED, "Number not valid."),
+                d(DeliveryStatus.FAILED, "No network signal."),
+                d(DeliveryStatus.SENT, null),
+                d(DeliveryStatus.FAILED, null)
+            )
+        )
+        assertEquals("No network signal.", reasons.first().reason)
+        assertEquals(2, reasons.first().count)
+        assertEquals(3, reasons.size)
+        assertEquals(4, reasons.sumOf { it.count })
     }
 
     @Test

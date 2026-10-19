@@ -11,7 +11,6 @@ import com.example.data.AddContactResult
 import com.example.data.BroadcastCounts
 import com.example.data.CampaignRepository
 import com.example.data.ContactEntity
-import com.example.data.DeliveryStatus
 import com.example.data.MessageBroadcastEntity
 import com.example.data.OrganisationProfileEntity
 import com.example.data.RecipientDeliveryEntity
@@ -58,6 +57,8 @@ data class ImportPreview(
     val newCount: Int get() = contacts.size - alreadySaved
 }
 
+enum class HistoryFilter { ALL, NEEDS_ATTENTION }
+
 /** One-off messages for the snackbar. [action] runs if the user taps [actionLabel]. */
 data class UiEvent(
     val message: String,
@@ -82,8 +83,30 @@ data class CampaignUiState(
     val usingBuildApiKey: Boolean = false,
     val savedApiKeyHint: String = "",
     val pendingImport: ImportPreview? = null,
-    val openBroadcastId: Long? = null
+    val openBroadcastId: Long? = null,
+    val historyFilter: HistoryFilter = HistoryFilter.ALL,
+    val openTemplatesOnCompose: Boolean = false,
+    val dismissedAttentionIds: Set<Long> = emptySet()
 ) {
+    /**
+     * Messages where some people didn't get it, sending has finished, and the user hasn't
+     * chosen "Mark as done". This is the one list users need to act on.
+     */
+    val attentionBroadcasts: List<MessageBroadcastEntity>
+        get() = broadcasts.filter { b ->
+            val c = broadcastCounts[b.id]
+            c != null && c.failed > 0 && c.pending == 0 &&
+                b.sendMode != SendMode.SMS_APP && b.id !in dismissedAttentionIds
+        }
+
+    /** Total people across [attentionBroadcasts] who didn't get their message. */
+    val attentionPeople: Int
+        get() = attentionBroadcasts.sumOf { broadcastCounts[it.id]?.failed ?: 0 }
+
+    /** The message currently going out, if any, for a live progress card. */
+    val sendingBroadcast: MessageBroadcastEntity?
+        get() = broadcasts.firstOrNull { (broadcastCounts[it.id]?.pending ?: 0) > 0 }
+
     val selectedContacts: List<ContactEntity>
         get() = contacts.filter { it.isSelected }
 
@@ -128,7 +151,10 @@ private data class LocalState(
     val usingBuildApiKey: Boolean = false,
     val savedApiKeyHint: String = "",
     val pendingImport: ImportPreview? = null,
-    val openBroadcastId: Long? = null
+    val openBroadcastId: Long? = null,
+    val historyFilter: HistoryFilter = HistoryFilter.ALL,
+    val openTemplatesOnCompose: Boolean = false,
+    val dismissedAttentionIds: Set<Long> = emptySet()
 )
 
 private data class DataState(
@@ -180,7 +206,10 @@ class CampaignViewModel(
             usingBuildApiKey = l.usingBuildApiKey,
             savedApiKeyHint = l.savedApiKeyHint,
             pendingImport = l.pendingImport,
-            openBroadcastId = l.openBroadcastId
+            openBroadcastId = l.openBroadcastId,
+            historyFilter = l.historyFilter,
+            openTemplatesOnCompose = l.openTemplatesOnCompose,
+            dismissedAttentionIds = l.dismissedAttentionIds
         )
     }.stateIn(
         scope = viewModelScope,
@@ -199,7 +228,8 @@ class CampaignViewModel(
                     initialized = true,
                     messageText = profile.draftMessage,
                     sendMode = profile.preferredSendMode,
-                    welcomeDone = settings.hasCompletedWelcome
+                    welcomeDone = settings.hasCompletedWelcome,
+                    dismissedAttentionIds = settings.dismissedAttentionIds
                 )
             }
         }
@@ -224,6 +254,38 @@ class CampaignViewModel(
             if (it.screen == AppScreen.COMPOSE) it
             else it.copy(screen = AppScreen.COMPOSE, composeReturnScreen = it.screen)
         }
+    }
+
+    /** Opens the composer with the template picker already showing. */
+    fun openComposeWithTemplates() {
+        local.update { it.copy(openTemplatesOnCompose = true) }
+        openCompose()
+    }
+
+    fun consumeOpenTemplates() {
+        local.update { it.copy(openTemplatesOnCompose = false) }
+    }
+
+    fun openHistory(filter: HistoryFilter) {
+        local.update { it.copy(screen = AppScreen.HISTORY, openBroadcastId = null, historyFilter = filter) }
+    }
+
+    fun setHistoryFilter(filter: HistoryFilter) {
+        local.update { it.copy(historyFilter = filter) }
+    }
+
+    /** "Mark as done": the user accepts that some people didn't get this message. */
+    fun dismissAttention(broadcastId: Long) {
+        val updated = local.value.dismissedAttentionIds + broadcastId
+        settings.dismissedAttentionIds = updated
+        local.update { it.copy(dismissedAttentionIds = updated) }
+        showMessage("Marked as done", "Undo") { restoreAttention(broadcastId) }
+    }
+
+    private fun restoreAttention(broadcastId: Long) {
+        val updated = local.value.dismissedAttentionIds - broadcastId
+        settings.dismissedAttentionIds = updated
+        local.update { it.copy(dismissedAttentionIds = updated) }
     }
 
     /** Handles the system back button. Returns false when the app should close. */
@@ -513,22 +575,26 @@ class CampaignViewModel(
     }
 
     /** Sends the message again to only the people it failed for. */
-    fun retryFailed(broadcastId: Long, activityContext: Context) {
+    /**
+     * Tries again for only the people a message failed for, updating that same message, so
+     * once a problem is fixed it disappears from "Needs attention" on its own.
+     */
+    fun retryFailed(broadcastId: Long) {
         if (local.value.isSending) return
+        local.update { it.copy(isSending = true) }
+        restoreAttention(broadcastId)
         viewModelScope.launch {
-            val broadcast = repository.getBroadcast(broadcastId) ?: return@launch
-            val failed = repository.getDeliveriesSnapshot(broadcastId)
-                .filter { it.status == DeliveryStatus.FAILED }
-                .map { ContactEntity(name = it.contactName, phoneNumber = it.phoneNumber) }
-            if (failed.isEmpty()) return@launch
-            dispatch(
-                activityContext = activityContext,
-                mode = broadcast.sendMode,
-                senderId = broadcast.senderIdUsed.ifBlank { uiState.value.activeSenderName },
-                label = broadcast.candidateLabel,
-                message = broadcast.messageText,
-                recipients = failed
-            )
+            try {
+                val broadcast = repository.getBroadcast(broadcastId) ?: return@launch
+                val toRetry = repository.prepareRetry(broadcastId)
+                if (toRetry.isEmpty()) return@launch
+                showMessage("Trying again for ${if (toRetry.size == 1) "1 person" else "${toRetry.size} people"}…")
+                smsSenderService.retry(broadcast, toRetry)
+            } catch (e: Exception) {
+                showMessage("Couldn't retry right now. Please try again.")
+            } finally {
+                local.update { it.copy(isSending = false) }
+            }
         }
     }
 

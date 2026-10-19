@@ -20,6 +20,14 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_WELCOME_DONE, false)
         set(value) = prefs.edit().putBoolean(KEY_WELCOME_DONE, value).apply()
 
+    /**
+     * Messages whose failures the user chose to leave as they are ("Mark as done"), so they stop
+     * showing under "Needs attention". Kept here rather than in Room to avoid a schema change.
+     */
+    var dismissedAttentionIds: Set<Long>
+        get() = prefs.getStringSet(KEY_DISMISSED, emptySet()).orEmpty().mapNotNull { it.toLongOrNull() }.toSet()
+        set(value) = prefs.edit().putStringSet(KEY_DISMISSED, value.map { it.toString() }.toSet()).apply()
+
     /** Key typed in the app, falling back to the one baked in at build time (if any). */
     fun effectiveApiKey(): String? {
         val userKey = smsOnlineGhApiKey.trim()
@@ -37,5 +45,6 @@ class SettingsStore(context: Context) {
         const val FILE_NAME = "dawuro_settings"
         private const val KEY_API_KEY = "smsonlinegh_api_key"
         private const val KEY_WELCOME_DONE = "welcome_done"
+        private const val KEY_DISMISSED = "dismissed_attention_ids"
     }
 }

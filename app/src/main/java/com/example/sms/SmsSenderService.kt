@@ -15,6 +15,7 @@ import com.example.data.BroadcastStatus
 import com.example.data.CampaignRepository
 import com.example.data.ContactEntity
 import com.example.data.DeliveryStatus
+import com.example.data.MessageBroadcastEntity
 import com.example.data.RecipientDeliveryEntity
 import com.example.data.SendMode
 import com.example.data.SettingsStore
@@ -89,11 +90,7 @@ class SmsSenderService(
         val text = prepareText(messageTemplate)
         val apiKey = settings.effectiveApiKey()
 
-        val setupProblem = when {
-            apiKey == null -> "SMS Online GH is not set up. Add your API key in Settings."
-            cleanSender.isEmpty() -> "Choose a sender name in Settings before sending with SMS Online GH."
-            else -> null
-        }
+        val setupProblem = gatewayProblem(apiKey, cleanSender)
         if (setupProblem != null) {
             val (broadcastId, _) = repository.createBroadcastWithRecipients(
                 senderIdUsed = cleanSender,
@@ -121,19 +118,64 @@ class SmsSenderService(
             initialRecipientStatus = DeliveryStatus.SENDING
         )
         onBroadcastCreated(broadcastId)
+        dispatchGateway(apiKey!!, cleanSender, text, deliveries)
+        broadcastId
+    }
 
+    private fun gatewayProblem(apiKey: String?, sender: String): String? = when {
+        apiKey == null -> "SMS Online GH is not set up. Add your API key in Settings."
+        sender.isEmpty() -> "Choose a sender name in Settings before sending with SMS Online GH."
+        else -> null
+    }
+
+    private suspend fun dispatchGateway(
+        apiKey: String,
+        sender: String,
+        text: String,
+        deliveries: List<RecipientDeliveryEntity>
+    ) {
         if (MessageTemplates.containsName(text)) {
             deliveries.forEach { delivery ->
                 val personal = MessageTemplates.personalize(text, delivery.contactName)
-                submitToGateway(apiKey!!, cleanSender, personal, listOf(delivery))
+                submitToGateway(apiKey, sender, personal, listOf(delivery))
             }
         } else {
             deliveries.chunked(GATEWAY_BATCH_SIZE).forEach { batch ->
-                submitToGateway(apiKey!!, cleanSender, text, batch)
+                submitToGateway(apiKey, sender, text, batch)
             }
         }
-        broadcastId
     }
+
+    /**
+     * Sends a message again to recipients of an existing message (already reset to "sending"),
+     * using the same method it was first sent with.
+     */
+    suspend fun retry(broadcast: MessageBroadcastEntity, deliveries: List<RecipientDeliveryEntity>) =
+        withContext(Dispatchers.IO) {
+            if (deliveries.isEmpty()) return@withContext
+            val problem: String? = when (broadcast.sendMode) {
+                SendMode.SMSONLINEGH -> {
+                    val apiKey = settings.effectiveApiKey()
+                    gatewayProblem(apiKey, broadcast.senderIdUsed) ?: run {
+                        dispatchGateway(apiKey!!, broadcast.senderIdUsed, broadcast.messageText, deliveries)
+                        null
+                    }
+                }
+                SendMode.DIRECT_SIM -> {
+                    val smsManager = smsManagerOrNull()
+                    simProblem(smsManager) ?: run {
+                        dispatchSim(smsManager!!, broadcast.messageText, deliveries)
+                        null
+                    }
+                }
+                else -> "This message was sent from your Messages app, so it can't be retried here."
+            }
+            if (problem != null) {
+                deliveries.forEach {
+                    repository.updateRecipientStatusAndRefreshBroadcast(it.id, DeliveryStatus.FAILED, problem)
+                }
+            }
+        }
 
     private suspend fun submitToGateway(
         apiKey: String,
@@ -223,23 +265,9 @@ class SmsSenderService(
         onBroadcastCreated: (Long) -> Unit = {}
     ): Long = withContext(Dispatchers.IO) {
         val text = prepareText(messageTemplate)
-        val smsManager: SmsManager? = try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                context.getSystemService(SmsManager::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                SmsManager.getDefault()
-            }
-        } catch (_: Exception) {
-            null
-        }
+        val smsManager = smsManagerOrNull()
 
-        val setupProblem = when {
-            !hasSendSmsPermission() -> "Dawuro is not allowed to send SMS. Allow it in your phone settings."
-            smsManager == null -> "This device cannot send SMS."
-            !isSimReady() -> "No SIM card is ready. Check that your SIM is inserted and has signal."
-            else -> null
-        }
+        val setupProblem = simProblem(smsManager)
         if (setupProblem != null) {
             val (broadcastId, _) = repository.createBroadcastWithRecipients(
                 senderIdUsed = "",
@@ -267,7 +295,29 @@ class SmsSenderService(
             initialRecipientStatus = DeliveryStatus.SENDING
         )
         onBroadcastCreated(broadcastId)
+        dispatchSim(smsManager!!, text, deliveries)
+        broadcastId
+    }
 
+    private fun smsManagerOrNull(): SmsManager? = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            context.getSystemService(SmsManager::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            SmsManager.getDefault()
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun simProblem(smsManager: SmsManager?): String? = when {
+        !hasSendSmsPermission() -> "Dawuro is not allowed to send SMS. Allow it in your phone settings."
+        smsManager == null -> "This device cannot send SMS."
+        !isSimReady() -> "No SIM card is ready. Check that your SIM is inserted and has signal."
+        else -> null
+    }
+
+    private suspend fun dispatchSim(smsManager: SmsManager, text: String, deliveries: List<RecipientDeliveryEntity>) {
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
 
         deliveries.forEach { delivery ->
@@ -275,7 +325,7 @@ class SmsSenderService(
                 val personal = MessageTemplates.personalize(text, delivery.contactName)
                 val sentPi = statusIntent(SmsStatusReceiver.ACTION_SMS_SENT, delivery.id, flags)
                 val deliveredPi = statusIntent(SmsStatusReceiver.ACTION_SMS_DELIVERED, delivery.id, flags)
-                val parts = smsManager!!.divideMessage(personal)
+                val parts = smsManager.divideMessage(personal)
                 if (parts.size <= 1) {
                     smsManager.sendTextMessage(delivery.phoneNumber, null, personal, sentPi, deliveredPi)
                 } else {
@@ -297,8 +347,6 @@ class SmsSenderService(
             // Spacing out sends keeps the phone's SMS queue from choking on large lists.
             delay(SIM_SEND_SPACING_MS)
         }
-
-        broadcastId
     }
 
     private fun statusIntent(action: String, deliveryId: Long, flags: Int): PendingIntent {

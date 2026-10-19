@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,12 +31,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Visibility
@@ -45,10 +49,12 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
@@ -62,6 +68,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -71,6 +78,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
 import com.example.data.SenderIdEntity
@@ -98,13 +106,10 @@ fun SettingsScreen(
     onDeleteSenderId: (SenderIdEntity) -> Unit,
     onClearAllContacts: () -> Unit
 ) {
-    val context = LocalContext.current
     val profile = uiState.profile
 
-    var name by rememberSaveable(profile.organisationName) { mutableStateOf(profile.organisationName) }
-    var subtitle by rememberSaveable(profile.roleOrSubtitle) { mutableStateOf(profile.roleOrSubtitle) }
-    var apiKey by rememberSaveable { mutableStateOf("") }
-    var showKey by remember { mutableStateOf(false) }
+    var showEditProfile by remember { mutableStateOf(false) }
+    var showApiKey by remember { mutableStateOf(false) }
     var showAddSender by remember { mutableStateOf(false) }
     var senderToDelete by remember { mutableStateOf<SenderIdEntity?>(null) }
     var confirmClearContacts by remember { mutableStateOf(false) }
@@ -112,7 +117,6 @@ fun SettingsScreen(
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) onPickPhoto(uri)
     }
-    val profileChanged = name.trim() != profile.organisationName || subtitle.trim() != profile.roleOrSubtitle
 
     Column(modifier = Modifier.fillMaxSize()) {
         ScreenTitleBar(title = "Settings")
@@ -123,63 +127,116 @@ fun SettingsScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp)
                 .align(Alignment.CenterHorizontally)
                 .widthIn(max = 600.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            // --- Profile ---
-            SettingsCard(title = "Your profile") {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            // --- Profile header ---
+            Card(
+                onClick = { showEditProfile = true },
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                modifier = Modifier.fillMaxWidth().testTag("profile_card")
+            ) {
+                Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Avatar(
                         name = uiState.displayName,
                         photoPath = profile.customPhotoPath,
-                        size = 72.dp,
+                        size = 64.dp,
                         background = MaterialTheme.colorScheme.primary
                     )
                     Spacer(Modifier.size(16.dp))
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        FilledTonalButton(
-                            onClick = {
-                                photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                            },
-                            modifier = Modifier.testTag("organisation_photo_box")
-                        ) {
-                            Icon(Icons.Rounded.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.size(8.dp))
-                            Text(if (profile.customPhotoPath == null) "Add photo or logo" else "Change photo")
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(uiState.displayName, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            profile.roleOrSubtitle.ifBlank { "Add a short description" },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Icon(Icons.Rounded.Edit, contentDescription = "Edit profile")
+                }
+            }
+
+            // --- Sending ---
+            SettingsSection("Sending") {
+                SettingsRow(
+                    icon = Icons.Rounded.Cloud,
+                    title = "SMS Online GH",
+                    subtitle = when {
+                        !uiState.gatewayConfigured -> "Not set up · for big groups with your own sender name"
+                        uiState.usingBuildApiKey -> "Connected (built-in key)"
+                        else -> "Connected (${uiState.savedApiKeyHint})"
+                    },
+                    trailing = {
+                        if (uiState.gatewayConfigured) {
+                            Icon(Icons.Rounded.CheckCircle, contentDescription = "Connected", tint = DawuroTheme.statusColors.success)
+                        } else {
+                            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null)
                         }
-                        if (profile.customPhotoPath != null) {
-                            TextButton(onClick = onRemovePhoto) { Text("Remove photo") }
+                    },
+                    onClick = { showApiKey = true },
+                    tag = "api_key_row"
+                )
+                HorizontalDivider(modifier = Modifier.padding(start = 56.dp))
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    Text("Sender names", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "The name people see instead of your number. It must be approved on your SMS Online GH account.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                uiState.senderIds.forEach { sender ->
+                    val active = sender.senderName.equals(uiState.activeSenderName, ignoreCase = true)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 56.dp)
+                            .selectable(selected = active, onClick = { onSelectSenderId(sender) }, role = Role.RadioButton)
+                            .padding(start = 8.dp)
+                            .testTag("sender_chip_${sender.senderName}"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(selected = active, onClick = null)
+                        Spacer(Modifier.size(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(sender.senderName, style = MaterialTheme.typography.bodyLarge)
+                            if (sender.candidateOrOrgLabel.isNotBlank() && sender.candidateOrOrgLabel != sender.senderName) {
+                                Text(
+                                    sender.candidateOrOrgLabel,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        IconButton(onClick = { senderToDelete = sender }) {
+                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Remove ${sender.senderName}")
                         }
                     }
                 }
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it.take(60) },
-                    label = { Text("Name or group name") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
-                    modifier = Modifier.fillMaxWidth().testTag("org_name_input")
-                )
-                OutlinedTextField(
-                    value = subtitle,
-                    onValueChange = { subtitle = it.take(80) },
-                    label = { Text("Short description (optional)") },
-                    placeholder = { Text("e.g. Women's Fellowship, Kumasi") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                    modifier = Modifier.fillMaxWidth().testTag("org_role_input")
-                )
-                Button(
-                    onClick = { onSaveProfile(name, subtitle) },
-                    enabled = profileChanged && name.isNotBlank(),
-                    modifier = Modifier.align(Alignment.End).testTag("save_org_customization_button")
-                ) { Text("Save") }
+                TextButton(
+                    onClick = { showAddSender = true },
+                    modifier = Modifier.padding(start = 8.dp, bottom = 4.dp).testTag("home_add_sender_id_button")
+                ) {
+                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(8.dp))
+                    Text("Add sender name")
+                }
             }
 
-            // --- Colours ---
-            SettingsCard(title = "App colour") {
+            // --- Appearance ---
+            SettingsSection("Appearance") {
+                Text(
+                    "App colour",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 16.dp, top = 12.dp)
+                )
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    modifier = Modifier.padding(16.dp)
                 ) {
                     ColourPresets.forEach { preset ->
                         val selected = profile.primaryColorHex.equals(preset.primaryHex, ignoreCase = true) &&
@@ -187,7 +244,7 @@ fun SettingsScreen(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Box(
                                 modifier = Modifier
-                                    .size(56.dp)
+                                    .size(52.dp)
                                     .clip(CircleShape)
                                     .background(preset.primary)
                                     .then(
@@ -205,12 +262,7 @@ fun SettingsScreen(
                                     .semantics { contentDescription = preset.name },
                                 contentAlignment = Alignment.BottomEnd
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .clip(CircleShape)
-                                        .background(preset.accent)
-                                )
+                                Box(modifier = Modifier.size(18.dp).clip(CircleShape).background(preset.accent))
                                 if (selected) {
                                     Icon(
                                         Icons.Rounded.Check,
@@ -223,7 +275,7 @@ fun SettingsScreen(
                             Text(
                                 preset.name,
                                 style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.padding(top = 4.dp).widthIn(max = 72.dp),
+                                modifier = Modifier.padding(top = 4.dp).widthIn(max = 68.dp),
                                 maxLines = 2
                             )
                         }
@@ -231,128 +283,16 @@ fun SettingsScreen(
                 }
             }
 
-            // --- SMS Online GH ---
-            SettingsCard(title = "SMS Online GH (optional)") {
-                Text(
-                    "Send to large groups with your own name (like \"GRACE CHAPEL\") showing as the sender, instead of your phone number. You need an account and SMS credit from SMS Online GH.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val ok = uiState.gatewayConfigured
-                    Icon(
-                        if (ok) Icons.Rounded.CheckCircle else Icons.Rounded.Info,
-                        contentDescription = null,
-                        tint = if (ok) DawuroTheme.statusColors.success else MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(Modifier.size(8.dp))
-                    Text(
-                        when {
-                            !ok -> "Not set up"
-                            uiState.usingBuildApiKey -> "Connected (key built into this app)"
-                            else -> "Connected (${uiState.savedApiKeyHint})"
-                        },
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-                OutlinedTextField(
-                    value = apiKey,
-                    onValueChange = { apiKey = it.trim() },
-                    label = { Text(if (uiState.savedApiKeyHint.isEmpty()) "Paste your API key" else "Replace API key") },
-                    singleLine = true,
-                    visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(onClick = { showKey = !showKey }) {
-                            Icon(
-                                if (showKey) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                contentDescription = if (showKey) "Hide key" else "Show key"
-                            )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth().testTag("api_key_input")
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = {
-                        try {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://smsonlinegh.com")))
-                        } catch (_: ActivityNotFoundException) {
-                        }
-                    }) {
-                        Text("Get an account")
-                        Spacer(Modifier.size(4.dp))
-                        Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
-                    }
-                    Spacer(Modifier.weight(1f))
-                    if (uiState.savedApiKeyHint.isNotEmpty()) {
-                        TextButton(onClick = { onSaveApiKey("") }) { Text("Remove") }
-                    }
-                    Button(
-                        onClick = {
-                            onSaveApiKey(apiKey)
-                            apiKey = ""
-                        },
-                        enabled = apiKey.length >= 8
-                    ) { Text("Save key") }
-                }
-
-                Text(
-                    "Sender names",
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-                Text(
-                    "Must match a sender name approved on your SMS Online GH account (up to 11 letters).",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                uiState.senderIds.forEach { sender ->
-                    val active = sender.senderName.equals(uiState.activeSenderName, ignoreCase = true)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 56.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .selectable(selected = active, onClick = { onSelectSenderId(sender) }, role = Role.RadioButton)
-                            .testTag("sender_chip_${sender.senderName}"),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(selected = active, onClick = null)
-                        Spacer(Modifier.size(8.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(sender.senderName, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
-                            if (sender.candidateOrOrgLabel.isNotBlank() && sender.candidateOrOrgLabel != sender.senderName) {
-                                Text(
-                                    sender.candidateOrOrgLabel,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                        IconButton(onClick = { senderToDelete = sender }) {
-                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Remove ${sender.senderName}")
-                        }
-                    }
-                }
-                OutlinedButton(
-                    onClick = { showAddSender = true },
-                    modifier = Modifier.testTag("home_add_sender_id_button")
-                ) {
-                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.size(8.dp))
-                    Text("Add sender name")
-                }
-            }
-
             // --- Data ---
             if (uiState.contacts.isNotEmpty()) {
-                SettingsCard(title = "Your data") {
-                    TextButton(onClick = { confirmClearContacts = true }) {
-                        Icon(Icons.Rounded.DeleteSweep, contentDescription = null, tint = MaterialTheme.colorScheme.error)
-                        Spacer(Modifier.size(8.dp))
-                        Text("Delete all ${uiState.contacts.size} contacts", color = MaterialTheme.colorScheme.error)
-                    }
+                SettingsSection("Your data") {
+                    SettingsRow(
+                        icon = Icons.Rounded.DeleteSweep,
+                        title = "Delete all contacts",
+                        subtitle = "${uiState.contacts.size} saved in Dawuro",
+                        destructive = true,
+                        onClick = { confirmClearContacts = true }
+                    )
                 }
             }
 
@@ -365,12 +305,36 @@ fun SettingsScreen(
                 KenteStripe(modifier = Modifier.widthIn(max = 120.dp), height = 4.dp)
                 Text("Dawuro ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "One message, everyone hears. Made for Ghana.",
+                    "One message, everyone hears.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
+    }
+
+    if (showEditProfile) {
+        EditProfileDialog(
+            uiState = uiState,
+            onPickPhoto = { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+            onRemovePhoto = onRemovePhoto,
+            onSave = { name, subtitle ->
+                onSaveProfile(name, subtitle)
+                showEditProfile = false
+            },
+            onDismiss = { showEditProfile = false }
+        )
+    }
+
+    if (showApiKey) {
+        ApiKeyDialog(
+            uiState = uiState,
+            onSave = {
+                onSaveApiKey(it)
+                showApiKey = false
+            },
+            onDismiss = { showApiKey = false }
+        )
     }
 
     if (showAddSender) {
@@ -404,18 +368,189 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SettingsCard(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Card(
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            content()
+private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            title,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(start = 4.dp)
+        )
+        Card(
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(content = content)
         }
     }
+}
+
+@Composable
+private fun SettingsRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    trailing: (@Composable () -> Unit)? = null,
+    destructive: Boolean = false,
+    tag: String? = null
+) {
+    val tint = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+    ListItem(
+        headlineContent = {
+            Text(title, color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+        },
+        supportingContent = { Text(subtitle) },
+        leadingContent = { Icon(icon, contentDescription = null, tint = tint) },
+        trailingContent = trailing,
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.clickable(onClick = onClick).then(if (tag != null) Modifier.testTag(tag) else Modifier)
+    )
+}
+
+@Composable
+private fun EditProfileDialog(
+    uiState: CampaignUiState,
+    onPickPhoto: () -> Unit,
+    onRemovePhoto: () -> Unit,
+    onSave: (String, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val profile = uiState.profile
+    var name by rememberSaveable { mutableStateOf(profile.organisationName) }
+    var subtitle by rememberSaveable { mutableStateOf(profile.roleOrSubtitle) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit profile") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Avatar(
+                        name = name.ifBlank { uiState.displayName },
+                        photoPath = profile.customPhotoPath,
+                        size = 64.dp,
+                        background = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.size(16.dp))
+                    Column {
+                        FilledTonalButton(onClick = onPickPhoto, modifier = Modifier.testTag("organisation_photo_box")) {
+                            Icon(Icons.Rounded.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.size(8.dp))
+                            Text(if (profile.customPhotoPath == null) "Add photo" else "Change")
+                        }
+                        if (profile.customPhotoPath != null) {
+                            TextButton(onClick = onRemovePhoto) { Text("Remove photo") }
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(60) },
+                    label = { Text("Name or group name") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
+                    modifier = Modifier.fillMaxWidth().testTag("org_name_input")
+                )
+                OutlinedTextField(
+                    value = subtitle,
+                    onValueChange = { subtitle = it.take(80) },
+                    label = { Text("Short description (optional)") },
+                    placeholder = { Text("e.g. Youth fellowship, Kumasi") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    modifier = Modifier.fillMaxWidth().testTag("org_role_input")
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(name, subtitle) },
+                enabled = name.isNotBlank(),
+                modifier = Modifier.testTag("save_org_customization_button")
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+@Composable
+private fun ApiKeyDialog(uiState: CampaignUiState, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var apiKey by rememberSaveable { mutableStateOf("") }
+    var showKey by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("SMS Online GH") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "Send to large groups with your own name (like \"GRACECHAPEL\") instead of your number. You need an account and SMS credit from SMS Online GH.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        if (uiState.gatewayConfigured) Icons.Rounded.CheckCircle else Icons.Rounded.Info,
+                        contentDescription = null,
+                        tint = if (uiState.gatewayConfigured) DawuroTheme.statusColors.success else MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.size(8.dp))
+                    Text(
+                        if (uiState.gatewayConfigured) "Connected" else "Not set up",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it.trim() },
+                    label = { Text(if (uiState.savedApiKeyHint.isEmpty()) "Paste your API key" else "Replace API key") },
+                    singleLine = true,
+                    visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showKey = !showKey }) {
+                            Icon(
+                                if (showKey) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                contentDescription = if (showKey) "Hide key" else "Show key"
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().testTag("api_key_input")
+                )
+                Row {
+                    TextButton(onClick = {
+                        try {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://smsonlinegh.com")))
+                        } catch (_: ActivityNotFoundException) {
+                        }
+                    }) {
+                        Text("Get an account")
+                        Spacer(Modifier.size(4.dp))
+                        Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                    }
+                    if (uiState.savedApiKeyHint.isNotEmpty()) {
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = { onSave("") }) {
+                            Text("Remove key", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSave(apiKey) }, enabled = apiKey.length >= 8) { Text("Save key") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
 }
 
 @Composable
@@ -448,7 +583,7 @@ private fun AddSenderDialog(onDismiss: () -> Unit, onSave: (String, String) -> U
                     value = note,
                     onValueChange = { note = it.take(60) },
                     label = { Text("Note for yourself (optional)") },
-                    placeholder = { Text("e.g. For church announcements") },
+                    placeholder = { Text("e.g. For announcements") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("new_sender_candidate_input")
                 )

@@ -284,6 +284,22 @@ class CampaignRepository(
         dao.updateBroadcast(broadcast.copy(overallStatus = overallStatus, statusDetail = detail))
     }
 
+    /**
+     * Puts the failed recipients of a message back to "sending" and returns them, so a retry
+     * updates the same message instead of creating a new one. Fixed problems then disappear
+     * from the list rather than piling up.
+     */
+    suspend fun prepareRetry(broadcastId: Long): List<RecipientDeliveryEntity> {
+        val failedIds = dao.getDeliveriesForBroadcastSnapshot(broadcastId)
+            .filter { it.status == DeliveryStatus.FAILED }
+            .map { it.id }
+            .toSet()
+        if (failedIds.isEmpty()) return emptyList()
+        dao.resetFailedToSending(broadcastId)
+        refreshBroadcastAggregateStatus(broadcastId)
+        return dao.getDeliveriesForBroadcastSnapshot(broadcastId).filter { it.id in failedIds }
+    }
+
     suspend fun deleteBroadcast(broadcastId: Long) {
         dao.deleteDeliveriesForBroadcast(broadcastId)
         dao.deleteBroadcastById(broadcastId)

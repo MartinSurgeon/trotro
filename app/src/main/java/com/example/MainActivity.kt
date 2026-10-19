@@ -15,6 +15,12 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import com.example.ui.components.AppSkeleton
+import com.example.viewmodel.HistoryFilter
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.rounded.Chat
@@ -24,7 +30,8 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.People
 import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -63,6 +70,9 @@ val LocalSnackbarHostState = staticCompositionLocalOf { SnackbarHostState() }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Shows the gong-gong splash while the app starts, then a shimmering skeleton
+        // takes over until the first data is ready.
+        installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
@@ -116,9 +126,11 @@ fun DawuroApp(viewModel: CampaignViewModel) {
 
     if (!uiState.isLoaded) {
         Box(
-            modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
-            contentAlignment = Alignment.Center
-        ) { CircularProgressIndicator() }
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .safeDrawingPadding()
+        ) { AppSkeleton() }
         return
     }
 
@@ -146,10 +158,22 @@ fun DawuroApp(viewModel: CampaignViewModel) {
                                 selected = selected,
                                 onClick = { viewModel.navigateTo(tab.screen) },
                                 icon = {
-                                    Icon(
-                                        imageVector = if (selected) tab.selectedIcon else tab.icon,
-                                        contentDescription = null
-                                    )
+                                    // The Messages tab shows how many messages need attention.
+                                    val badgeCount = if (tab.screen == AppScreen.HISTORY) uiState.attentionBroadcasts.size else 0
+                                    BadgedBox(
+                                        badge = {
+                                            if (badgeCount > 0) {
+                                                Badge(modifier = Modifier.semantics {
+                                                    contentDescription = "$badgeCount need attention"
+                                                }) { Text(badgeCount.toString()) }
+                                            }
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = if (selected) tab.selectedIcon else tab.icon,
+                                            contentDescription = null
+                                        )
+                                    }
                                 },
                                 label = { Text(tab.label) },
                                 modifier = Modifier.testTag(tab.testTag)
@@ -180,8 +204,10 @@ private fun ScreenContent(screen: AppScreen, viewModel: CampaignViewModel) {
         AppScreen.HOME -> HomeScreen(
             uiState = uiState,
             onNewMessage = viewModel::openCompose,
+            onOpenTemplates = viewModel::openComposeWithTemplates,
             onOpenContacts = { viewModel.navigateTo(AppScreen.CONTACTS) },
-            onOpenHistory = { viewModel.navigateTo(AppScreen.HISTORY) },
+            onOpenHistory = { viewModel.openHistory(HistoryFilter.ALL) },
+            onOpenNeedsAttention = { viewModel.openHistory(HistoryFilter.NEEDS_ATTENTION) },
             onOpenSettings = { viewModel.navigateTo(AppScreen.SETTINGS) },
             onOpenBroadcast = { id ->
                 viewModel.navigateTo(AppScreen.HISTORY)
@@ -217,15 +243,19 @@ private fun ScreenContent(screen: AppScreen, viewModel: CampaignViewModel) {
             onToggleGroup = viewModel::toggleGroupSelection,
             onOpenContacts = { viewModel.navigateTo(AppScreen.CONTACTS) },
             onOpenSettings = { viewModel.navigateTo(AppScreen.SETTINGS) },
-            onConfirmSend = { viewModel.executeConfirmedSend(context) }
+            onConfirmSend = { viewModel.executeConfirmedSend(context) },
+            openTemplatesOnStart = uiState.openTemplatesOnCompose,
+            onTemplatesOpened = viewModel::consumeOpenTemplates
         )
 
         AppScreen.HISTORY -> HistoryScreen(
             uiState = uiState,
             observeDeliveries = viewModel::observeDeliveriesForBroadcast,
             onOpenBroadcast = viewModel::openBroadcast,
+            onSetFilter = viewModel::setHistoryFilter,
             onReuseMessage = viewModel::reuseMessage,
-            onRetryFailed = { id -> viewModel.retryFailed(id, context) },
+            onRetryFailed = viewModel::retryFailed,
+            onMarkDone = viewModel::dismissAttention,
             onDeleteBroadcast = viewModel::deleteBroadcast,
             onNewMessage = viewModel::openCompose,
             hasSendSmsPermission = viewModel::hasSendSmsPermission

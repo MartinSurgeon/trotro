@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.ContactsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -97,7 +98,15 @@ private val csvMimeTypes = arrayOf(
     "*/*"
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** A–Z sections like the phone's own contacts app; numbers-only contacts go under "#" at the end. */
+private fun alphabetSections(contacts: List<ContactEntity>): List<Pair<String, List<ContactEntity>>> =
+    contacts
+        .groupBy { c -> c.name.trim().firstOrNull()?.takeIf { it.isLetter() }?.uppercase() ?: "#" }
+        .toList()
+        .sortedWith(compareBy({ it.first == "#" }, { it.first }))
+        .map { (letter, members) -> letter to members.sortedBy { it.name.lowercase() } }
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ContactsScreen(
     uiState: CampaignUiState,
@@ -267,8 +276,20 @@ fun ContactsScreen(
                     // Room for the two stacked buttons so they never cover the last contact.
                     contentPadding = PaddingValues(bottom = 160.dp)
                 ) {
-                    items(filtered, key = { it.id }) { contact ->
-                        ContactRow(contact = contact, onClick = { editing = contact })
+                    alphabetSections(filtered).forEach { (letter, members) ->
+                        stickyHeader(key = "letter_$letter") {
+                            Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    letter,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                        items(members, key = { it.id }) { contact ->
+                            ContactRow(contact = contact, onClick = { editing = contact })
+                        }
                     }
                 }
             }

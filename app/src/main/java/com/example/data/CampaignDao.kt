@@ -115,6 +115,12 @@ interface CampaignDao {
     )
     fun observeBroadcastCounts(): Flow<List<BroadcastCounts>>
 
+    @Query(
+        "UPDATE recipient_deliveries SET status = 'SENDING', errorDetail = NULL, updatedAt = :now " +
+            "WHERE broadcastId = :broadcastId AND status = 'FAILED'"
+    )
+    suspend fun resetFailedToSending(broadcastId: Long, now: Long = System.currentTimeMillis())
+
     @Query("SELECT DISTINCT broadcastId FROM recipient_deliveries WHERE status = 'SENDING' AND updatedAt < :before")
     suspend fun getBroadcastIdsWithStaleSending(before: Long): List<Long>
 

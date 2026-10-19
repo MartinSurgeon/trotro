@@ -126,7 +126,9 @@ fun ComposeScreen(
     onToggleGroup: (GroupInfo) -> Unit,
     onOpenContacts: () -> Unit,
     onOpenSettings: () -> Unit,
-    onConfirmSend: () -> Unit
+    onConfirmSend: () -> Unit,
+    openTemplatesOnStart: Boolean = false,
+    onTemplatesOpened: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val snackbar = LocalSnackbarHostState.current
@@ -135,6 +137,14 @@ fun ComposeScreen(
     var showRecipients by remember { mutableStateOf(false) }
     var showTemplates by remember { mutableStateOf(false) }
     var showConfirm by remember { mutableStateOf(false) }
+
+    // Arriving from the Home "Templates" shortcut opens the picker straight away.
+    LaunchedEffect(openTemplatesOnStart) {
+        if (openTemplatesOnStart) {
+            showTemplates = true
+            onTemplatesOpened()
+        }
+    }
 
     // Re-check SIM and permission when the user comes back from system settings.
     var environmentTick by remember { mutableIntStateOf(0) }
